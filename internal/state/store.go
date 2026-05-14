@@ -3,7 +3,7 @@
 //
 //   - "live": observed via an SSE event (or pending-permission poll) during
 //     this monitor run. These get the full attention classification.
-//   - "recent": imported from /experimental/session because they were touched
+//   - "recent": imported from /session because they were touched
 //     within the recency window. Treated as discovery context only — they
 //     never trigger IDLE-WAIT attention on their own. Promoted to "live"
 //     the moment any event arrives for them.
@@ -64,6 +64,8 @@ type instanceState struct {
 	perms    map[string]string
 }
 
+const messageActivityDebounce = 250 * time.Millisecond
+
 type Store struct {
 	mu        sync.Mutex
 	instances map[string]*instanceState
@@ -111,7 +113,7 @@ func (s *Store) RemoveInstance(id string) {
 	s.publish()
 }
 
-// SyncRecent imports sessions from a recency-window /experimental/session
+// SyncRecent imports sessions from a recency-window /session
 // fetch. New rows land as "recent"; rows already present (live OR recent)
 // just get fresher metadata merged in.
 func (s *Store) SyncRecent(instanceID string, sessions []oc.Session) {
@@ -121,24 +123,41 @@ func (s *Store) SyncRecent(instanceID string, sessions []oc.Session) {
 		s.mu.Unlock()
 		return
 	}
+	changed := false
+	seen := map[string]bool{}
 	for _, info := range sessions {
+		seen[info.ID] = true
 		row, exists := inst.sessions[info.ID]
 		if !exists {
 			row = &sessionRow{source: SourceRecent}
 			inst.sessions[info.ID] = row
+			changed = true
 		}
-		mergeSessionInfo(&row.info, info)
+		if mergeSessionInfo(&row.info, info) {
+			changed = true
+		}
 		// Seed a baseline lastActivity from the server's update timestamp so
 		// the pane sorts sensibly even before any event arrives.
 		if info.Time.Updated > 0 {
 			ts := time.UnixMilli(info.Time.Updated)
 			if ts.After(row.lastActivity) {
 				row.lastActivity = ts
+				changed = true
 			}
 		}
 	}
+	// Prune rows that only exist because they were previously "recent" but no
+	// longer fall in the recency window.
+	for sid, row := range inst.sessions {
+		if row.source == SourceRecent && !seen[sid] {
+			delete(inst.sessions, sid)
+			changed = true
+		}
+	}
 	s.mu.Unlock()
-	s.publish()
+	if changed {
+		s.publish()
+	}
 }
 
 func (s *Store) SyncPermissions(instanceID string, perms []oc.PermissionRequest) {
@@ -148,23 +167,40 @@ func (s *Store) SyncPermissions(instanceID string, perms []oc.PermissionRequest)
 		s.mu.Unlock()
 		return
 	}
-	inst.perms = map[string]string{}
+	changed := false
+	newPerms := map[string]string{}
 	wantSessions := map[string]bool{}
 	for _, p := range perms {
-		inst.perms[p.ID] = p.SessionID
+		newPerms[p.ID] = p.SessionID
 		wantSessions[p.SessionID] = true
+	}
+	if !equalStringMaps(inst.perms, newPerms) {
+		inst.perms = newPerms
+		changed = true
 	}
 	for sid := range wantSessions {
 		// A pending permission promotes a session to "live" — it needs
 		// attention right now regardless of how we first heard of it.
-		row := s.touchLocked(inst, sid)
-		row.source = SourceLive
+		row, created := s.touchLocked(inst, sid)
+		if created {
+			changed = true
+		}
+		if row != nil && row.source != SourceLive {
+			row.source = SourceLive
+			changed = true
+		}
 	}
 	for _, row := range inst.sessions {
-		row.hasPerm = sessionHasPermission(inst, row.info.ID)
+		hasPerm := sessionHasPermission(inst, row.info.ID)
+		if row.hasPerm != hasPerm {
+			row.hasPerm = hasPerm
+			changed = true
+		}
 	}
 	s.mu.Unlock()
-	s.publish()
+	if changed {
+		s.publish()
+	}
 }
 
 func (s *Store) Republish() { s.publish() }
@@ -177,11 +213,21 @@ func (s *Store) ApplyEvent(instanceID string, evt oc.Event) {
 		return
 	}
 	now := s.now()
+	changed := false
 
 	// Helper used by every case: any event for a session promotes it to live.
 	promote := func(sid string) *sessionRow {
-		row := s.touchLocked(inst, sid)
-		row.source = SourceLive
+		row, created := s.touchLocked(inst, sid)
+		if row == nil {
+			return nil
+		}
+		if created {
+			changed = true
+		}
+		if row.source != SourceLive {
+			row.source = SourceLive
+			changed = true
+		}
 		return row
 	}
 
@@ -190,49 +236,83 @@ func (s *Store) ApplyEvent(instanceID string, evt oc.Event) {
 		var p oc.SessionInfoEvt
 		if json.Unmarshal(evt.Properties, &p) == nil {
 			row := promote(p.SessionID)
-			mergeSessionInfo(&row.info, p.Info)
-			row.lastActivity = now
+			if row != nil {
+				if mergeSessionInfo(&row.info, p.Info) {
+					changed = true
+				}
+				row.lastActivity = now
+				changed = true
+			}
 		}
 	case "session.deleted":
 		var p oc.SessionInfoEvt
 		if json.Unmarshal(evt.Properties, &p) == nil {
-			delete(inst.sessions, p.SessionID)
+			if _, ok := inst.sessions[p.SessionID]; ok {
+				delete(inst.sessions, p.SessionID)
+				changed = true
+			}
 		}
 	case "session.status":
 		var p oc.SessionStatusEvt
 		if json.Unmarshal(evt.Properties, &p) == nil {
 			row := promote(p.SessionID)
-			row.status = p.Status
-			row.lastActivity = now
+			if row != nil {
+				if row.status != p.Status {
+					row.status = p.Status
+					changed = true
+				}
+				row.lastActivity = now
+				changed = true
+			}
 		}
 	case "session.idle":
 		var p oc.SessionIDEvt
 		if json.Unmarshal(evt.Properties, &p) == nil {
 			row := promote(p.SessionID)
-			if row.status.Type == "" {
-				row.status = oc.Status{Type: "idle"}
+			if row != nil {
+				if row.status.Type == "" {
+					row.status = oc.Status{Type: "idle"}
+					changed = true
+				}
+				row.lastActivity = now
+				changed = true
 			}
-			row.lastActivity = now
 		}
 	case "session.error":
 		var p oc.SessionErrorEvt
 		if json.Unmarshal(evt.Properties, &p) == nil {
 			row := promote(p.SessionID)
-			row.lastError = now
+			if row != nil {
+				row.lastError = now
+				changed = true
+			}
 		}
 	case "permission.asked":
 		var p oc.PermissionRequest
 		if json.Unmarshal(evt.Properties, &p) == nil {
-			inst.perms[p.ID] = p.SessionID
+			if existing, ok := inst.perms[p.ID]; !ok || existing != p.SessionID {
+				inst.perms[p.ID] = p.SessionID
+				changed = true
+			}
 			row := promote(p.SessionID)
-			row.hasPerm = true
+			if row != nil && !row.hasPerm {
+				row.hasPerm = true
+				changed = true
+			}
 		}
 	case "permission.replied":
 		var p oc.PermissionRepliedEvt
 		if json.Unmarshal(evt.Properties, &p) == nil {
-			delete(inst.perms, p.RequestID)
+			if _, ok := inst.perms[p.RequestID]; ok {
+				delete(inst.perms, p.RequestID)
+				changed = true
+			}
 			if row, ok := inst.sessions[p.SessionID]; ok {
-				row.hasPerm = sessionHasPermission(inst, p.SessionID)
+				hasPerm := sessionHasPermission(inst, p.SessionID)
+				if row.hasPerm != hasPerm {
+					row.hasPerm = hasPerm
+					changed = true
+				}
 			}
 		}
 	case "message.updated", "message.part.updated", "message.part.delta":
@@ -255,54 +335,87 @@ func (s *Store) ApplyEvent(instanceID string, evt oc.Event) {
 			}
 			if sid != "" {
 				row := promote(sid)
-				row.lastActivity = now
+				if row != nil {
+					if row.lastActivity.IsZero() || now.Sub(row.lastActivity) >= messageActivityDebounce {
+						row.lastActivity = now
+						changed = true
+					}
+				}
 			}
 		}
 	}
 	s.mu.Unlock()
-	s.publish()
+	if changed {
+		s.publish()
+	}
 }
 
-func mergeSessionInfo(dst *oc.Session, src oc.Session) {
+func mergeSessionInfo(dst *oc.Session, src oc.Session) bool {
+	changed := false
 	if src.ID != "" {
+		if dst.ID != src.ID {
+			changed = true
+		}
 		dst.ID = src.ID
 	}
 	if src.Slug != "" {
+		if dst.Slug != src.Slug {
+			changed = true
+		}
 		dst.Slug = src.Slug
 	}
 	if src.Title != "" {
+		if dst.Title != src.Title {
+			changed = true
+		}
 		dst.Title = src.Title
 	}
 	if src.Directory != "" {
+		if dst.Directory != src.Directory {
+			changed = true
+		}
 		dst.Directory = src.Directory
 	}
 	if src.ParentID != "" {
+		if dst.ParentID != src.ParentID {
+			changed = true
+		}
 		dst.ParentID = src.ParentID
 	}
 	if src.Agent != "" {
+		if dst.Agent != src.Agent {
+			changed = true
+		}
 		dst.Agent = src.Agent
 	}
 	if src.Time.Created > 0 {
+		if dst.Time.Created != src.Time.Created {
+			changed = true
+		}
 		dst.Time.Created = src.Time.Created
 	}
 	if src.Time.Updated > 0 {
+		if dst.Time.Updated != src.Time.Updated {
+			changed = true
+		}
 		dst.Time.Updated = src.Time.Updated
 	}
+	return changed
 }
 
-func (s *Store) touchLocked(inst *instanceState, sid string) *sessionRow {
+func (s *Store) touchLocked(inst *instanceState, sid string) (*sessionRow, bool) {
 	if sid == "" {
-		return &sessionRow{}
+		return nil, false
 	}
 	row, ok := inst.sessions[sid]
 	if ok {
-		return row
+		return row, false
 	}
 	row = &sessionRow{}
 	row.info.ID = sid
 	inst.sessions[sid] = row
 	go s.fetchSessionInfo(inst.id, sid)
-	return row
+	return row, true
 }
 
 func (s *Store) fetchSessionInfo(instanceID, sid string) {
@@ -322,15 +435,20 @@ func (s *Store) fetchSessionInfo(instanceID, sid string) {
 	if err != nil {
 		return
 	}
+	changed := false
 	s.mu.Lock()
 	inst = s.instances[instanceID]
 	if inst != nil {
 		if row, ok := inst.sessions[sid]; ok {
-			mergeSessionInfo(&row.info, info)
+			if mergeSessionInfo(&row.info, info) {
+				changed = true
+			}
 		}
 	}
 	s.mu.Unlock()
-	s.publish()
+	if changed {
+		s.publish()
+	}
 }
 
 func sessionHasPermission(inst *instanceState, sid string) bool {
@@ -340,6 +458,18 @@ func sessionHasPermission(inst *instanceState, sid string) bool {
 		}
 	}
 	return false
+}
+
+func equalStringMaps(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) publish() {
@@ -381,6 +511,9 @@ func (s *Store) snapshot() Snapshot {
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].InstanceID != rows[j].InstanceID {
 			return rows[i].InstanceID < rows[j].InstanceID
+		}
+		if rows[i].LastActivity.Equal(rows[j].LastActivity) {
+			return rows[i].SessionID < rows[j].SessionID
 		}
 		return rows[i].LastActivity.After(rows[j].LastActivity)
 	})

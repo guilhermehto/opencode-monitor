@@ -136,18 +136,16 @@ func (s *supervisor) run(ctx context.Context, inst discovery.Instance) {
 // ---- Bubble Tea ----
 
 type snapshotMsg state.Snapshot
-type tickMsg time.Time
 
 type model struct {
 	snap   state.Snapshot
 	width  int
 	height int
-	store  *state.Store
 	snaps  <-chan state.Snapshot
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(waitSnapshot(m.snaps), tickEvery())
+	return waitSnapshot(m.snaps)
 }
 
 func waitSnapshot(ch <-chan state.Snapshot) tea.Cmd {
@@ -158,10 +156,6 @@ func waitSnapshot(ch <-chan state.Snapshot) tea.Cmd {
 		}
 		return snapshotMsg(s)
 	}
-}
-
-func tickEvery() tea.Cmd {
-	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -176,11 +170,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case snapshotMsg:
 		m.snap = state.Snapshot(msg)
 		return m, waitSnapshot(m.snaps)
-	case tickMsg:
-		if m.store != nil {
-			m.store.Republish()
-		}
-		return m, tickEvery()
 	}
 	return m, nil
 }
@@ -299,13 +288,21 @@ func renderTree(rows []state.SessionView, width int) string {
 		if li != lj {
 			return li
 		}
+		if roots[i].LastActivity.Equal(roots[j].LastActivity) {
+			return roots[i].SessionID < roots[j].SessionID
+		}
 		return roots[i].LastActivity.After(roots[j].LastActivity)
 	})
 	var b strings.Builder
 	for _, r := range roots {
 		b.WriteString(formatRow(r, width, false) + "\n")
 		kids := byParent[r.SessionID]
-		sort.Slice(kids, func(i, j int) bool { return kids[i].LastActivity.After(kids[j].LastActivity) })
+		sort.Slice(kids, func(i, j int) bool {
+			if kids[i].LastActivity.Equal(kids[j].LastActivity) {
+				return kids[i].SessionID < kids[j].SessionID
+			}
+			return kids[i].LastActivity.After(kids[j].LastActivity)
+		})
 		for _, c := range kids {
 			b.WriteString(formatRow(c, width, true) + "\n")
 		}
@@ -329,6 +326,9 @@ func (m model) renderAttention(width int) string {
 	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].Attention.Rank() != rows[j].Attention.Rank() {
 			return rows[i].Attention.Rank() < rows[j].Attention.Rank()
+		}
+		if rows[i].LastActivity.Equal(rows[j].LastActivity) {
+			return rows[i].SessionID < rows[j].SessionID
 		}
 		return rows[i].LastActivity.After(rows[j].LastActivity)
 	})
@@ -395,7 +395,7 @@ func main() {
 		}
 	}()
 
-	m := model{store: store, snaps: store.Subscribe()}
+	m := model{snaps: store.Subscribe()}
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
