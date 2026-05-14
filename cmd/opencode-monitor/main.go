@@ -183,6 +183,7 @@ var (
 	paneStyle   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
 
 	attnPermStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
+	attnQuestionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true)
 	attnErrStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
 	attnInactiveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	attnActiveStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
@@ -194,6 +195,8 @@ func attnLabel(a state.Attention, source state.Source) string {
 	switch a {
 	case state.AttnPermissionPending:
 		return attnPermStyle.Render("PERMISSION")
+	case state.AttnQuestionPending:
+		return attnQuestionStyle.Render("QUESTION  ")
 	case state.AttnErrored:
 		return attnErrStyle.Render("ERROR     ")
 	}
@@ -223,7 +226,7 @@ type rowKey struct {
 }
 
 func needsAttention(a state.Attention) bool {
-	return a == state.AttnPermissionPending || a == state.AttnErrored
+	return a == state.AttnPermissionPending || a == state.AttnQuestionPending || a == state.AttnErrored
 }
 
 func shouldHideSubagent(sv state.SessionView) bool {

@@ -51,17 +51,19 @@ type sessionRow struct {
 	info         oc.Session
 	status       oc.Status
 	hasPerm      bool
+	hasQuestion  bool
 	source       Source
 	lastError    time.Time
 	lastActivity time.Time
 }
 
 type instanceState struct {
-	id       string
-	name     string
-	client   *oc.Client
-	sessions map[string]*sessionRow
-	perms    map[string]string
+	id        string
+	name      string
+	client    *oc.Client
+	sessions  map[string]*sessionRow
+	perms     map[string]string
+	questions map[string]string
 }
 
 const messageActivityDebounce = 250 * time.Millisecond
@@ -95,11 +97,12 @@ func (s *Store) AddInstance(inst discovery.Instance) {
 	s.mu.Lock()
 	if _, ok := s.instances[inst.ID]; !ok {
 		s.instances[inst.ID] = &instanceState{
-			id:       inst.ID,
-			name:     inst.ID,
-			client:   oc.NewClient(inst.BaseURL()),
-			sessions: map[string]*sessionRow{},
-			perms:    map[string]string{},
+			id:        inst.ID,
+			name:      inst.ID,
+			client:    oc.NewClient(inst.BaseURL()),
+			sessions:  map[string]*sessionRow{},
+			perms:     map[string]string{},
+			questions: map[string]string{},
 		}
 	}
 	s.mu.Unlock()
@@ -323,6 +326,12 @@ func (s *Store) ApplyEvent(instanceID string, evt oc.Event) {
 			} `json:"info"`
 			Part *struct {
 				SessionID string `json:"sessionID"`
+				Type      string `json:"type"`
+				Tool      string `json:"tool"`
+				CallID    string `json:"callID"`
+				State     *struct {
+					Status string `json:"status"`
+				} `json:"state"`
 			} `json:"part"`
 		}
 		if json.Unmarshal(evt.Properties, &p) == nil {
@@ -339,6 +348,34 @@ func (s *Store) ApplyEvent(instanceID string, evt oc.Event) {
 					if row.lastActivity.IsZero() || now.Sub(row.lastActivity) >= messageActivityDebounce {
 						row.lastActivity = now
 						changed = true
+					}
+				}
+				if p.Part != nil && p.Part.Type == "tool" && p.Part.Tool == "question" && p.Part.CallID != "" && p.Part.State != nil {
+					affectedSessions := map[string]bool{sid: true}
+					switch p.Part.State.Status {
+					case "pending":
+						if existingSID, ok := inst.questions[p.Part.CallID]; !ok || existingSID != sid {
+							if ok && existingSID != "" {
+								affectedSessions[existingSID] = true
+							}
+							inst.questions[p.Part.CallID] = sid
+							changed = true
+						}
+					case "completed", "error":
+						if existingSID, ok := inst.questions[p.Part.CallID]; ok {
+							delete(inst.questions, p.Part.CallID)
+							affectedSessions[existingSID] = true
+							changed = true
+						}
+					}
+					for affectedSID := range affectedSessions {
+						if questionRow, ok := inst.sessions[affectedSID]; ok {
+							hasQuestion := sessionHasQuestion(inst, affectedSID)
+							if questionRow.hasQuestion != hasQuestion {
+								questionRow.hasQuestion = hasQuestion
+								changed = true
+							}
+						}
 					}
 				}
 			}
@@ -460,6 +497,15 @@ func sessionHasPermission(inst *instanceState, sid string) bool {
 	return false
 }
 
+func sessionHasQuestion(inst *instanceState, sid string) bool {
+	for _, s := range inst.questions {
+		if s == sid {
+			return true
+		}
+	}
+	return false
+}
+
 func equalStringMaps(a, b map[string]string) bool {
 	if len(a) != len(b) {
 		return false
@@ -503,7 +549,7 @@ func (s *Store) snapshot() Snapshot {
 				Agent:        row.info.Agent,
 				StatusType:   row.status.Type,
 				Source:       row.source,
-				Attention:    Classify(row.status.Type, row.hasPerm, row.lastError, row.lastActivity),
+				Attention:    Classify(row.status.Type, row.hasPerm, row.hasQuestion, row.lastError, row.lastActivity),
 				LastActivity: row.lastActivity,
 			})
 		}

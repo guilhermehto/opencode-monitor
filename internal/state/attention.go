@@ -3,13 +3,14 @@ package state
 import "time"
 
 // Attention is a coarse triage label derived from session status, pending
-// permissions, and event history.
+// permissions/questions, and event history.
 type Attention string
 
 const (
 	AttnActive            Attention = "active"
 	AttnInactive          Attention = "inactive"
 	AttnPermissionPending Attention = "permission"
+	AttnQuestionPending   Attention = "question"
 	AttnErrored           Attention = "errored"
 )
 
@@ -17,6 +18,8 @@ const (
 func (a Attention) Rank() int {
 	switch a {
 	case AttnPermissionPending:
+		return 0
+	case AttnQuestionPending:
 		return 0
 	case AttnErrored:
 		return 1
@@ -29,12 +32,15 @@ func (a Attention) Rank() int {
 //
 // statusType is the value of SessionStatus.type ("idle", "generating",
 // "retry", ...). hasPermission means a pending permission request exists for
-// this session. lastError is the time of the most recent session.error event
-// (zero if none). lastActivity is the time of the most recent
-// message/session update.
-func Classify(statusType string, hasPermission bool, lastError, lastActivity time.Time) Attention {
+// this session. hasQuestion means a pending question tool request exists.
+// lastError is the time of the most recent session.error event (zero if none).
+// lastActivity is the time of the most recent message/session update.
+func Classify(statusType string, hasPermission, hasQuestion bool, lastError, lastActivity time.Time) Attention {
 	if hasPermission {
 		return AttnPermissionPending
+	}
+	if hasQuestion {
+		return AttnQuestionPending
 	}
 	// An error counts as needing attention until something newer happens.
 	if !lastError.IsZero() && !lastError.Before(lastActivity) {

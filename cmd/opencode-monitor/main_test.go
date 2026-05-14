@@ -46,6 +46,7 @@ func TestVisibleSessionsKeepsUrgentSubagentsVisible(t *testing.T) {
 	rows := []state.SessionView{
 		makeSessionView("root", "", "idle", state.AttnInactive),
 		makeSessionView("child-perm", "root", "idle", state.AttnPermissionPending),
+		makeSessionView("child-question", "root", "idle", state.AttnQuestionPending),
 		makeSessionView("child-err", "root", "", state.AttnErrored),
 	}
 
@@ -54,7 +55,7 @@ func TestVisibleSessionsKeepsUrgentSubagentsVisible(t *testing.T) {
 	for _, sv := range visible {
 		ids[sv.SessionID] = true
 	}
-	if !ids["child-perm"] || !ids["child-err"] {
+	if !ids["child-perm"] || !ids["child-question"] || !ids["child-err"] {
 		t.Fatalf("urgent subagents must stay visible: %+v", ids)
 	}
 }

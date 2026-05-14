@@ -92,3 +92,57 @@ func TestSnapshotSortBreaksLastActivityTiesBySessionID(t *testing.T) {
 		t.Fatalf("unexpected order: %q, %q", snap.Sessions[0].SessionID, snap.Sessions[1].SessionID)
 	}
 }
+
+func TestApplyEventQuestionPendingLifecycle(t *testing.T) {
+	ctx := context.Background()
+	s := New(ctx)
+	inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 1}
+	s.AddInstance(inst)
+	s.SyncRecent(inst.ID, []oc.Session{makeSession("S1", 1_000)})
+
+	applyQuestion := func(callID, status string) {
+		t.Helper()
+		s.ApplyEvent(inst.ID, oc.Event{
+			Type: "message.part.updated",
+			Properties: mustJSON(t, map[string]any{
+				"part": map[string]any{
+					"sessionID": "S1",
+					"type":      "tool",
+					"tool":      "question",
+					"callID":    callID,
+					"state": map[string]any{
+						"status": status,
+					},
+				},
+			}),
+		})
+	}
+
+	assertAttention := func(want Attention) {
+		t.Helper()
+		snap := s.snapshot()
+		if len(snap.Sessions) != 1 {
+			t.Fatalf("expected 1 session, got %d", len(snap.Sessions))
+		}
+		if got := snap.Sessions[0].Attention; got != want {
+			t.Fatalf("attention = %q, want %q", got, want)
+		}
+	}
+
+	assertAttention(AttnInactive)
+
+	applyQuestion("call-1", "pending")
+	assertAttention(AttnQuestionPending)
+
+	applyQuestion("call-1", "running")
+	assertAttention(AttnQuestionPending)
+
+	applyQuestion("call-2", "pending")
+	assertAttention(AttnQuestionPending)
+
+	applyQuestion("call-1", "completed")
+	assertAttention(AttnQuestionPending)
+
+	applyQuestion("call-2", "error")
+	assertAttention(AttnInactive)
+}

@@ -2,7 +2,8 @@
 
 Throwaway POC: a TUI command centre that gives a **live** multi-session view of
 locally-running [opencode](https://opencode.ai) instances and triages sessions
-that need attention (pending permission requests and errors), while separating
+that need attention (pending permission requests, pending questions, and
+errors), while separating
 active work from inactive context.
 
 **Status:** proof of concept. macOS only. Read-only; no controls. Don't ship.
@@ -38,12 +39,12 @@ Two panes, split horizontally:
     Non-busy top-level sessions render as `inactive`.
     Subagents nest under their parent with `↳` and an `@agent-name` tag.
     Finished subagents (`idle`/empty status) are hidden unless they have a
-    pending permission request or an unresolved error.
+    pending permission request, pending question, or an unresolved error.
   - **Recent** rows (dim, italic `recent` label): pulled from each instance's
     project session list, filtered to those updated in the last 30 minutes.
     Promoted to "live" the moment any event arrives for them.
 - **Needs attention** (right): subset of the above with a pending permission
-  request or an unresolved error. Sorted by urgency.
+  request, pending question, or an unresolved error. Sorted by urgency.
 
 ## How it works
 
