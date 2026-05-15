@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"os"
 	"sort"
@@ -190,6 +191,30 @@ var (
 
 	statusBusyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 )
+
+// agentPalette is a curated set of 256-color codes that read well against
+// a dark terminal background. The four attention colours (214/226/196/82)
+// are intentionally excluded so a stable agent colour can never visually
+// collide with PERMISSION/QUESTION/ERROR/active.
+var agentPalette = []string{
+	"33", "39", "45", "51", "75", "81",
+	"99", "105", "111", "117", "135", "141",
+	"147", "153", "165", "171", "177", "183",
+	"203", "207", "213", "219",
+}
+
+// agentColor returns a stable italic style for a given agent name. The
+// hash-mod indexing means the same agent always lands on the same
+// colour across snapshots and across instances.
+func agentColor(name string) lipgloss.Style {
+	if name == "" {
+		return agentStyle
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(name))
+	idx := h.Sum32() % uint32(len(agentPalette))
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(agentPalette[idx])).Italic(true)
+}
 
 // Single-cell mdi glyphs that replace the padded state label. Each glyph
 // is paired with the existing attention colour so an attention row visibly
@@ -438,7 +463,7 @@ func formatRow(now time.Time, sv state.SessionView, width int, child bool) strin
 	}
 	agentTag := ""
 	if sv.Agent != "" {
-		agentTag = agentStyle.Render("@" + sv.Agent)
+		agentTag = agentColor(sv.Agent).Render("@" + sv.Agent)
 	}
 	titleRender := title
 	if sv.Source == state.SourceRecent {
