@@ -20,6 +20,18 @@ func makeSessionView(id, parentID, status string, attn state.Attention) state.Se
 	}
 }
 
+func liveSessionView(id, parentID, status string, attn state.Attention) state.SessionView {
+	sv := makeSessionView(id, parentID, status, attn)
+	sv.Source = state.SourceLive
+	return sv
+}
+
+func recentSessionView(id, parentID, status string, attn state.Attention) state.SessionView {
+	sv := makeSessionView(id, parentID, status, attn)
+	sv.Source = state.SourceRecent
+	return sv
+}
+
 func TestVisibleSessionsHidesFinishedSubagents(t *testing.T) {
 	rows := []state.SessionView{
 		makeSessionView("root", "", "idle", state.AttnInactive),
@@ -185,13 +197,19 @@ func TestFormatRelativeBoundaries(t *testing.T) {
 	}
 }
 
-func TestVisibleSessionsCollapseDropsInactiveKeepsAttention(t *testing.T) {
+func TestVisibleSessionsCollapseDropsRecentKeepsLive(t *testing.T) {
 	rows := []state.SessionView{
-		makeSessionView("calm", "", "idle", state.AttnInactive),
-		makeSessionView("urgent", "", "idle", state.AttnPermissionPending),
-		makeSessionView("question", "", "idle", state.AttnQuestionPending),
-		makeSessionView("errored", "", "", state.AttnErrored),
-		makeSessionView("active", "", "busy", state.AttnActive),
+		// Live rows of every flavour, including inactive — none should be
+		// dropped by the collapse since the user wants to see what the
+		// monitor is currently observing, idle or not.
+		liveSessionView("calm", "", "idle", state.AttnInactive),
+		liveSessionView("urgent", "", "idle", state.AttnPermissionPending),
+		liveSessionView("question", "", "idle", state.AttnQuestionPending),
+		liveSessionView("errored", "", "", state.AttnErrored),
+		liveSessionView("active", "", "busy", state.AttnActive),
+		// A historical row imported from /session — this is the only one
+		// the collapse should drop.
+		recentSessionView("history", "", "idle", state.AttnInactive),
 	}
 
 	visible, counts := visibleSessions(rows, true)
@@ -199,30 +217,52 @@ func TestVisibleSessionsCollapseDropsInactiveKeepsAttention(t *testing.T) {
 	for _, sv := range visible {
 		ids[sv.SessionID] = true
 	}
-	if ids["calm"] {
-		t.Fatalf("collapsed view must drop inactive root: %+v", ids)
-	}
-	for _, must := range []string{"urgent", "question", "errored", "active"} {
+	for _, must := range []string{"calm", "urgent", "question", "errored", "active"} {
 		if !ids[must] {
-			t.Fatalf("collapsed view must keep %q visible: %+v", must, ids)
+			t.Fatalf("collapsed view must keep live row %q visible: %+v", must, ids)
 		}
 	}
+	if ids["history"] {
+		t.Fatalf("collapsed view must drop recent row: %+v", ids)
+	}
 	if counts["inst-1"] != 1 {
-		t.Fatalf("inactive count for inst-1 = %d, want 1", counts["inst-1"])
+		t.Fatalf("recent count for inst-1 = %d, want 1", counts["inst-1"])
 	}
 }
 
-func TestVisibleSessionsCollapseCountsButHidesInactiveSubagents(t *testing.T) {
-	// shouldHideSubagent already removes idle subagents, so they must not
-	// be double-counted under the "N inactive" summary.
+func TestVisibleSessionsExpandKeepsRecent(t *testing.T) {
 	rows := []state.SessionView{
-		makeSessionView("root", "", "idle", state.AttnInactive),
-		makeSessionView("child-idle", "root", "idle", state.AttnInactive),
+		liveSessionView("active", "", "busy", state.AttnActive),
+		recentSessionView("history", "", "idle", state.AttnInactive),
 	}
-	_, counts := visibleSessions(rows, true)
+	visible, counts := visibleSessions(rows, false)
+	ids := map[string]bool{}
+	for _, sv := range visible {
+		ids[sv.SessionID] = true
+	}
+	if !ids["history"] {
+		t.Fatalf("expanded view must keep recent row visible: %+v", ids)
+	}
 	if counts["inst-1"] != 1 {
-		t.Fatalf("inactive count = %d, want 1 (root only, child-idle is hidden subagent)", counts["inst-1"])
+		t.Fatalf("recent count for inst-1 = %d, want 1", counts["inst-1"])
 	}
+}
+
+func TestVisibleSessionsCollapseReparentsLiveChildAcrossHiddenRecentRoot(t *testing.T) {
+	rows := []state.SessionView{
+		recentSessionView("recent-root", "", "idle", state.AttnInactive),
+		liveSessionView("live-child", "recent-root", "busy", state.AttnActive),
+	}
+	visible, _ := visibleSessions(rows, true)
+	for _, sv := range visible {
+		if sv.SessionID == "live-child" {
+			if sv.ParentID != "" {
+				t.Fatalf("live child of hidden recent root should be promoted to root, got parent %q", sv.ParentID)
+			}
+			return
+		}
+	}
+	t.Fatalf("live-child not visible: %+v", visible)
 }
 
 func TestProcessBellTransitionsFiresOnceWhileAttentionStable(t *testing.T) {

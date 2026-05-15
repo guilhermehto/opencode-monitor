@@ -140,13 +140,13 @@ func (s *supervisor) run(ctx context.Context, inst discovery.Instance) {
 type snapshotMsg state.Snapshot
 
 type model struct {
-	snap              state.Snapshot
-	width             int
-	height            int
-	snaps             <-chan state.Snapshot
-	inactiveCollapsed bool
-	bellEnabled       bool
-	bellSent          map[rowKey]state.Attention
+	snap            state.Snapshot
+	width           int
+	height          int
+	snaps           <-chan state.Snapshot
+	recentCollapsed bool
+	bellEnabled     bool
+	bellSent        map[rowKey]state.Attention
 }
 
 func (m model) Init() tea.Cmd {
@@ -170,7 +170,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c", "esc":
 			return m, tea.Quit
 		case "a":
-			m.inactiveCollapsed = !m.inactiveCollapsed
+			m.recentCollapsed = !m.recentCollapsed
 			return m, nil
 		}
 	case tea.WindowSizeMsg:
@@ -351,14 +351,15 @@ func shouldHideSubagent(sv state.SessionView) bool {
 
 // visibleSessions filters the snapshot rows for the sessions pane. It
 // always drops finished subagents (idle leaf nodes) and reparents
-// surviving children across hidden ancestors. When collapseInactive is
-// true it additionally drops top-level rows whose attention is
-// AttnInactive so the pane fills with sessions that actually need eyes.
+// surviving children across hidden ancestors. When collapseRecent is
+// true it additionally drops rows whose Source is SourceRecent so the
+// pane fills with sessions the monitor is actively observing instead
+// of historical context imported from /session.
 //
-// The second return value tracks how many inactive rows belong to each
-// instance (regardless of whether they were dropped) so the caller can
-// surface a `▸ N inactive` summary line per group.
-func visibleSessions(all []state.SessionView, collapseInactive bool) ([]state.SessionView, map[string]int) {
+// The second return value tracks how many recent rows belong to each
+// instance (regardless of whether they were dropped) so the caller
+// can surface a `▸ N recent` summary line per group.
+func visibleSessions(all []state.SessionView, collapseRecent bool) ([]state.SessionView, map[string]int) {
 	byKey := make(map[rowKey]state.SessionView, len(all))
 	hidden := make(map[rowKey]bool, len(all))
 	for _, sv := range all {
@@ -367,25 +368,29 @@ func visibleSessions(all []state.SessionView, collapseInactive bool) ([]state.Se
 		if shouldHideSubagent(sv) {
 			hidden[k] = true
 		}
+		// When collapsing recents, treat them like hidden ancestors so
+		// nearestVisibleParentID can reparent their live descendants.
+		if collapseRecent && sv.Source == state.SourceRecent {
+			hidden[k] = true
+		}
 	}
 
-	inactiveByInstance := make(map[string]int)
+	recentByInstance := make(map[string]int)
 	out := make([]state.SessionView, 0, len(all))
 	for _, sv := range all {
-		k := rowKey{instanceID: sv.InstanceID, sessionID: sv.SessionID}
-		if hidden[k] {
+		if shouldHideSubagent(sv) {
 			continue
 		}
-		if sv.Attention == state.AttnInactive {
-			inactiveByInstance[sv.InstanceName]++
-			if collapseInactive {
+		if sv.Source == state.SourceRecent {
+			recentByInstance[sv.InstanceName]++
+			if collapseRecent {
 				continue
 			}
 		}
 		sv.ParentID = nearestVisibleParentID(sv, byKey, hidden)
 		out = append(out, sv)
 	}
-	return out, inactiveByInstance
+	return out, recentByInstance
 }
 
 func nearestVisibleParentID(sv state.SessionView, byKey map[rowKey]state.SessionView, hidden map[rowKey]bool) string {
@@ -408,12 +413,12 @@ func (m model) View() string {
 	if m.width == 0 {
 		return "loading..."
 	}
-	rows, inactiveByInstance := visibleSessions(m.snap.Sessions, m.inactiveCollapsed)
+	rows, recentByInstance := visibleSessions(m.snap.Sessions, m.recentCollapsed)
 	paneW := m.width - 2
 	if paneW < 30 {
 		paneW = 30
 	}
-	body := paneStyle.Width(paneW).Render(m.renderAllSessions(paneW, rows, inactiveByInstance))
+	body := paneStyle.Width(paneW).Render(m.renderAllSessions(paneW, rows, recentByInstance))
 	live, recent := 0, 0
 	for _, sv := range rows {
 		if sv.Source == state.SourceRecent {
@@ -423,9 +428,9 @@ func (m model) View() string {
 		}
 	}
 	header := titleStyle.Render("opencode-monitor") + dimStyle.Render(
-		fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  a to %s inactive  ·  q to quit",
+		fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  a to %s recent  ·  q to quit",
 			live, recent, int(recentWindow.Minutes()), m.snap.UpdatedAt.Format("15:04:05"),
-			toggleVerb(m.inactiveCollapsed)))
+			toggleVerb(m.recentCollapsed)))
 	return header + "\n" + body + "\n" + legendLine()
 }
 
@@ -452,10 +457,10 @@ func toggleVerb(collapsed bool) string {
 	return "hide"
 }
 
-func (m model) renderAllSessions(width int, rows []state.SessionView, inactiveByInstance map[string]int) string {
+func (m model) renderAllSessions(width int, rows []state.SessionView, recentByInstance map[string]int) string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Sessions") + "\n")
-	if len(rows) == 0 && len(inactiveByInstance) == 0 {
+	if len(rows) == 0 && len(recentByInstance) == 0 {
 		b.WriteString(dimStyle.Render("(no live or recent sessions on discovered instances)"))
 		return b.String()
 	}
@@ -472,7 +477,7 @@ func (m model) renderAllSessions(width int, rows []state.SessionView, inactiveBy
 	for k := range groups {
 		keySet[k] = struct{}{}
 	}
-	for k := range inactiveByInstance {
+	for k := range recentByInstance {
 		keySet[k] = struct{}{}
 	}
 	keys := make([]string, 0, len(keySet))
@@ -487,12 +492,12 @@ func (m model) renderAllSessions(width int, rows []state.SessionView, inactiveBy
 		if rows := groups[k]; len(rows) > 0 {
 			b.WriteString(renderTree(now, rows, width-2))
 		}
-		if n := inactiveByInstance[k]; n > 0 {
+		if n := recentByInstance[k]; n > 0 {
 			marker := "▸"
-			if !m.inactiveCollapsed {
+			if !m.recentCollapsed {
 				marker = "▾"
 			}
-			b.WriteString(dimStyle.Render(fmt.Sprintf("%s %d inactive", marker, n)) + "\n")
+			b.WriteString(dimStyle.Render(fmt.Sprintf("%s %d recent", marker, n)) + "\n")
 		}
 	}
 	return b.String()
@@ -723,10 +728,10 @@ func runTUI(bellEnabled bool) {
 	}()
 
 	m := model{
-		snaps:             store.Subscribe(),
-		inactiveCollapsed: true,
-		bellEnabled:       bellEnabled,
-		bellSent:          map[rowKey]state.Attention{},
+		snaps:           store.Subscribe(),
+		recentCollapsed: true,
+		bellEnabled:     bellEnabled,
+		bellSent:        map[rowKey]state.Attention{},
 	}
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
