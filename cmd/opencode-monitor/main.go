@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"hash/fnv"
 	"log"
@@ -144,6 +145,8 @@ type model struct {
 	height            int
 	snaps             <-chan state.Snapshot
 	inactiveCollapsed bool
+	bellEnabled       bool
+	bellSent          map[rowKey]state.Attention
 }
 
 func (m model) Init() tea.Cmd {
@@ -174,9 +177,50 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 	case snapshotMsg:
 		m.snap = state.Snapshot(msg)
+		if m.bellEnabled {
+			fired := processBellTransitions(m.snap.Sessions, m.bellSent)
+			for range fired {
+				_, _ = os.Stderr.Write([]byte{'\a'})
+			}
+		}
 		return m, waitSnapshot(m.snaps)
 	}
 	return m, nil
+}
+
+// processBellTransitions diffs the current snapshot against bellSent
+// and returns the rowKeys that should ring the bell on this tick.
+//
+// A bell fires when a session transitions into an attention state for
+// the first time, or transitions between two distinct attention
+// states (e.g. PERMISSION -> ERROR). It does NOT fire on subsequent
+// snapshots while the session sits in the same attention state. Once
+// a session leaves the attention set, its bellSent entry is cleared
+// so re-entering will fire again.
+//
+// bellSent is mutated in place; entries for sessions that disappeared
+// from the snapshot are pruned so the map cannot grow unbounded.
+func processBellTransitions(rows []state.SessionView, bellSent map[rowKey]state.Attention) []rowKey {
+	seen := map[rowKey]bool{}
+	var fired []rowKey
+	for _, sv := range rows {
+		key := rowKey{instanceID: sv.InstanceID, sessionID: sv.SessionID}
+		seen[key] = true
+		if needsAttention(sv.Attention) {
+			if bellSent[key] != sv.Attention {
+				fired = append(fired, key)
+				bellSent[key] = sv.Attention
+			}
+		} else {
+			delete(bellSent, key)
+		}
+	}
+	for k := range bellSent {
+		if !seen[k] {
+			delete(bellSent, k)
+		}
+	}
+	return fired
 }
 
 var (
@@ -562,6 +606,9 @@ func trimAgentSuffix(title, agent string) string {
 }
 
 func main() {
+	bell := flag.Bool("bell", false, "ring terminal bell on transitions into attention states")
+	flag.Parse()
+
 	logF, err := os.Create("/tmp/opencode-monitor.log")
 	if err == nil {
 		log.SetOutput(logF)
@@ -589,7 +636,12 @@ func main() {
 		}
 	}()
 
-	m := model{snaps: store.Subscribe(), inactiveCollapsed: true}
+	m := model{
+		snaps:             store.Subscribe(),
+		inactiveCollapsed: true,
+		bellEnabled:       *bell,
+		bellSent:          map[rowKey]state.Attention{},
+	}
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
