@@ -81,18 +81,12 @@ func browseOnce(d time.Duration) map[string]Instance {
 			if !strings.HasPrefix(inst, "opencode-") {
 				continue
 			}
-			advertised := ""
-			if e.AddrV4 != nil {
-				advertised = e.AddrV4.String()
-			} else if e.Host != "" {
-				advertised = strings.TrimSuffix(e.Host, ".")
-			}
-			if advertised == "" {
-				continue
-			}
-			id := fmt.Sprintf("%s:%d", advertised, e.Port)
 			// Localhost-only POC: opencode rejects requests to non-loopback
 			// hostnames even when bound on 0.0.0.0, so always dial 127.0.0.1.
+			// Key by port alone so a single server advertised on multiple
+			// network interfaces (e.g. wifi + link-local + IPv6) collapses
+			// to one Instance instead of N duplicates.
+			id := fmt.Sprintf("127.0.0.1:%d", e.Port)
 			out[id] = Instance{ID: id, Host: "127.0.0.1", Port: e.Port}
 		}
 		close(done)
