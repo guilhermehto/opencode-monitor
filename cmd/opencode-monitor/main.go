@@ -223,6 +223,27 @@ func attnLabel(a state.Attention, source state.Source) string {
 	return attnActiveStyle.Render(glyphActive) + " "
 }
 
+// formatRelative renders a compact "Xm"/"Xh" duration suitable for the
+// ACTIVITY column. Diffs under a minute collapse to "now"; a zero
+// timestamp returns "" so the column stays empty for sessions we have
+// no activity record for.
+func formatRelative(now, t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	d := now.Sub(t)
+	if d < 0 {
+		d = 0
+	}
+	if d < time.Minute {
+		return "now"
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	}
+	return fmt.Sprintf("%dh", int(d/time.Hour))
+}
+
 func styledStatus(s string) string {
 	switch s {
 	case "busy", "generating":
@@ -325,6 +346,11 @@ func (m model) renderAllSessions(width int, rows []state.SessionView) string {
 		b.WriteString(dimStyle.Render("(no live or recent sessions on discovered instances)"))
 		return b.String()
 	}
+	b.WriteString(columnHeader(width-2) + "\n")
+	now := m.snap.UpdatedAt
+	if now.IsZero() {
+		now = time.Now()
+	}
 	groups := map[string][]state.SessionView{}
 	for _, sv := range rows {
 		groups[sv.InstanceName] = append(groups[sv.InstanceName], sv)
@@ -338,12 +364,24 @@ func (m model) renderAllSessions(width int, rows []state.SessionView) string {
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		b.WriteString(renderTree(groups[k], width-2))
+		b.WriteString(renderTree(now, groups[k], width-2))
 	}
 	return b.String()
 }
 
-func renderTree(rows []state.SessionView, width int) string {
+// columnHeader renders the dim labels above the trees so users can map
+// each glyph/text fragment back to a logical column without a legend.
+func columnHeader(width int) string {
+	left := dimStyle.Render("STATE  AGENT  TITLE")
+	right := dimStyle.Render("STATUS  ACTIVITY")
+	pad := width - lipgloss.Width(left) - lipgloss.Width(right)
+	if pad < 1 {
+		pad = 1
+	}
+	return left + strings.Repeat(" ", pad) + right
+}
+
+func renderTree(now time.Time, rows []state.SessionView, width int) string {
 	byParent := map[string][]state.SessionView{}
 	knownIDs := map[string]bool{}
 	for _, r := range rows {
@@ -370,7 +408,7 @@ func renderTree(rows []state.SessionView, width int) string {
 	})
 	var b strings.Builder
 	for _, r := range roots {
-		b.WriteString(formatRow(r, width, false) + "\n")
+		b.WriteString(formatRow(now, r, width, false) + "\n")
 		kids := byParent[r.SessionID]
 		sort.Slice(kids, func(i, j int) bool {
 			if kids[i].LastActivity.Equal(kids[j].LastActivity) {
@@ -379,13 +417,13 @@ func renderTree(rows []state.SessionView, width int) string {
 			return kids[i].LastActivity.After(kids[j].LastActivity)
 		})
 		for _, c := range kids {
-			b.WriteString(formatRow(c, width, true) + "\n")
+			b.WriteString(formatRow(now, c, width, true) + "\n")
 		}
 	}
 	return b.String()
 }
 
-func formatRow(sv state.SessionView, width int, child bool) string {
+func formatRow(now time.Time, sv state.SessionView, width int, child bool) string {
 	title := sv.Title
 	if title == "" {
 		title = sv.Slug
@@ -410,7 +448,16 @@ func formatRow(sv state.SessionView, width int, child bool) string {
 	if agentTag != "" {
 		left = fmt.Sprintf("%s%s  %s %s", prefix, attnLabel(sv.Attention, sv.Source), agentTag, titleRender)
 	}
-	right := styledStatus(sv.StatusType)
+	status := styledStatus(sv.StatusType)
+	activity := dimStyle.Render(formatRelative(now, sv.LastActivity))
+	right := activity
+	if status != "" {
+		if activity != "" {
+			right = status + "  " + activity
+		} else {
+			right = status
+		}
+	}
 	pad := width - lipgloss.Width(left) - lipgloss.Width(right)
 	if pad < 1 {
 		pad = 1

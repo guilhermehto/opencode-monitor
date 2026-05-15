@@ -91,7 +91,7 @@ func TestFormatRowAgentBeforeTitleAndDedupesAgentSuffix(t *testing.T) {
 		Source:     state.SourceLive,
 	}
 
-	row := formatRow(sv, 120, false)
+	row := formatRow(time.Now(), sv, 120, false)
 	if !strings.Contains(row, "@scribe refactor parser") {
 		t.Fatalf("row = %q, want agent before title", row)
 	}
