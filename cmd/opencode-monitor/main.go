@@ -607,6 +607,7 @@ func trimAgentSuffix(title, agent string) string {
 
 func main() {
 	bell := flag.Bool("bell", false, "ring terminal bell on transitions into attention states")
+	status := flag.Bool("status", false, "print a one-shot icons-only attention summary and exit")
 	flag.Parse()
 
 	logF, err := os.Create("/tmp/opencode-monitor.log")
@@ -614,6 +615,91 @@ func main() {
 		log.SetOutput(logF)
 		defer logF.Close()
 	}
+	if *status {
+		runStatus()
+		return
+	}
+	runTUI(*bell)
+}
+
+// runStatus is the one-shot path used by status bars and shell prompts.
+// It boots discovery + supervisor, waits up to 3s for a non-empty
+// snapshot, then prints a single icons-only summary line of the
+// attention-bearing sessions (or an empty line if there are none) and
+// exits. The TUI is never started.
+func runStatus() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := state.New(ctx)
+	sup := newSupervisor(store)
+
+	events, err := discovery.Browse(ctx)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "mdns:", err)
+		os.Exit(1)
+	}
+	go func() {
+		for ev := range events {
+			switch {
+			case ev.Added != nil:
+				sup.onAdd(ctx, *ev.Added)
+			case ev.Removed != nil:
+				sup.onRemove(ev.Removed.ID)
+			}
+		}
+	}()
+
+	snaps := store.Subscribe()
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	for {
+		select {
+		case snap, ok := <-snaps:
+			if !ok {
+				fmt.Println("")
+				return
+			}
+			if len(snap.Sessions) == 0 {
+				continue
+			}
+			fmt.Println(formatStatusLine(snap.Sessions))
+			return
+		case <-deadline.C:
+			fmt.Println("")
+			return
+		}
+	}
+}
+
+// formatStatusLine counts attention-bearing rows and renders a compact
+// `<glyph> <count>` summary. Empty string means no session needs eyes.
+func formatStatusLine(rows []state.SessionView) string {
+	perm, question, errored := 0, 0, 0
+	for _, sv := range rows {
+		switch sv.Attention {
+		case state.AttnPermissionPending:
+			perm++
+		case state.AttnQuestionPending:
+			question++
+		case state.AttnErrored:
+			errored++
+		}
+	}
+	var parts []string
+	if question > 0 {
+		parts = append(parts, fmt.Sprintf("%s %d", glyphQuestion, question))
+	}
+	if perm > 0 {
+		parts = append(parts, fmt.Sprintf("%s %d", glyphPermission, perm))
+	}
+	if errored > 0 {
+		parts = append(parts, fmt.Sprintf("%s %d", glyphError, errored))
+	}
+	return strings.Join(parts, " ")
+}
+
+func runTUI(bellEnabled bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -639,7 +725,7 @@ func main() {
 	m := model{
 		snaps:             store.Subscribe(),
 		inactiveCollapsed: true,
-		bellEnabled:       *bell,
+		bellEnabled:       bellEnabled,
 		bellSent:          map[rowKey]state.Attention{},
 	}
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
