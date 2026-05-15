@@ -345,3 +345,42 @@ func TestProcessBellTransitionsPrunesDisappearedSessions(t *testing.T) {
 		t.Fatalf("disappeared session should be pruned, bellSent = %+v", bellSent)
 	}
 }
+
+func TestRenderAllSessionsRecentMarkerSitsAboveRecentRows(t *testing.T) {
+	m := model{width: 200, snap: state.Snapshot{UpdatedAt: time.Unix(0, 0)}}
+	live := liveSessionView("live-row", "", "idle", state.AttnInactive)
+	live.Title = "live-title"
+	recent := recentSessionView("recent-row", "", "idle", state.AttnInactive)
+	recent.Title = "recent-title"
+
+	rendered := m.renderAllSessions(200, []state.SessionView{live, recent}, map[string]int{"inst-1": 1})
+
+	livePos := strings.Index(rendered, "live-title")
+	markerPos := strings.Index(rendered, "1 recent")
+	recentPos := strings.Index(rendered, "recent-title")
+	if livePos < 0 || markerPos < 0 || recentPos < 0 {
+		t.Fatalf("missing fragment in rendered output: %q", rendered)
+	}
+	if !(livePos < markerPos && markerPos < recentPos) {
+		t.Fatalf("expected order live -> marker -> recent, got positions live=%d marker=%d recent=%d in %q",
+			livePos, markerPos, recentPos, rendered)
+	}
+}
+
+func TestRenderAllSessionsCollapsedHidesRecentRowsButKeepsMarker(t *testing.T) {
+	m := model{width: 200, recentCollapsed: true, snap: state.Snapshot{UpdatedAt: time.Unix(0, 0)}}
+	// visibleSessions(collapse=true) is the source of truth for which
+	// rows reach the renderer; recreate that contract here.
+	visible, counts := visibleSessions([]state.SessionView{
+		liveSessionView("live", "", "busy", state.AttnActive),
+		recentSessionView("history", "", "idle", state.AttnInactive),
+	}, true)
+
+	rendered := m.renderAllSessions(200, visible, counts)
+	if strings.Contains(rendered, "history") {
+		t.Fatalf("collapsed view must not render recent row title, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "1 recent") {
+		t.Fatalf("collapsed view must still show recent count marker, got %q", rendered)
+	}
+}

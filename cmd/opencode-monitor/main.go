@@ -489,8 +489,20 @@ func (m model) renderAllSessions(width int, rows []state.SessionView, recentByIn
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		if rows := groups[k]; len(rows) > 0 {
-			b.WriteString(renderTree(now, rows, width-2))
+		// Split each instance group into a live tree and a recent tree
+		// so the visual structure is unambiguous: live rows first, then
+		// the "▾ N recent" header acting as a section divider, then the
+		// recent rows underneath (only when expanded).
+		var live, recent []state.SessionView
+		for _, sv := range groups[k] {
+			if sv.Source == state.SourceRecent {
+				recent = append(recent, sv)
+			} else {
+				live = append(live, sv)
+			}
+		}
+		if len(live) > 0 {
+			b.WriteString(renderTree(now, live, width-2))
 		}
 		if n := recentByInstance[k]; n > 0 {
 			marker := "▸"
@@ -498,6 +510,9 @@ func (m model) renderAllSessions(width int, rows []state.SessionView, recentByIn
 				marker = "▾"
 			}
 			b.WriteString(dimStyle.Render(fmt.Sprintf("%s %d recent", marker, n)) + "\n")
+			if !m.recentCollapsed && len(recent) > 0 {
+				b.WriteString(renderTree(now, recent, width-2))
+			}
 		}
 	}
 	return b.String()
