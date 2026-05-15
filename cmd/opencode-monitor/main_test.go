@@ -159,3 +159,149 @@ func TestViewDoesNotRenderNeedsAttentionPane(t *testing.T) {
 		t.Fatalf("rendered = %q, want sessions pane", rendered)
 	}
 }
+
+func TestFormatRelativeBoundaries(t *testing.T) {
+	now := time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		t    time.Time
+		want string
+	}{
+		{"zero time renders empty", time.Time{}, ""},
+		{"now (0 diff)", now, "now"},
+		{"30s under a minute", now.Add(-30 * time.Second), "now"},
+		{"exactly 1m", now.Add(-time.Minute), "1m"},
+		{"59m just under an hour", now.Add(-59 * time.Minute), "59m"},
+		{"exactly 60m flips to 1h", now.Add(-60 * time.Minute), "1h"},
+		{"24h", now.Add(-24 * time.Hour), "24h"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := formatRelative(now, c.t)
+			if got != c.want {
+				t.Fatalf("formatRelative(%v) = %q, want %q", c.t, got, c.want)
+			}
+		})
+	}
+}
+
+func TestVisibleSessionsCollapseDropsInactiveKeepsAttention(t *testing.T) {
+	rows := []state.SessionView{
+		makeSessionView("calm", "", "idle", state.AttnInactive),
+		makeSessionView("urgent", "", "idle", state.AttnPermissionPending),
+		makeSessionView("question", "", "idle", state.AttnQuestionPending),
+		makeSessionView("errored", "", "", state.AttnErrored),
+		makeSessionView("active", "", "busy", state.AttnActive),
+	}
+
+	visible, counts := visibleSessions(rows, true)
+	ids := map[string]bool{}
+	for _, sv := range visible {
+		ids[sv.SessionID] = true
+	}
+	if ids["calm"] {
+		t.Fatalf("collapsed view must drop inactive root: %+v", ids)
+	}
+	for _, must := range []string{"urgent", "question", "errored", "active"} {
+		if !ids[must] {
+			t.Fatalf("collapsed view must keep %q visible: %+v", must, ids)
+		}
+	}
+	if counts["inst-1"] != 1 {
+		t.Fatalf("inactive count for inst-1 = %d, want 1", counts["inst-1"])
+	}
+}
+
+func TestVisibleSessionsCollapseCountsButHidesInactiveSubagents(t *testing.T) {
+	// shouldHideSubagent already removes idle subagents, so they must not
+	// be double-counted under the "N inactive" summary.
+	rows := []state.SessionView{
+		makeSessionView("root", "", "idle", state.AttnInactive),
+		makeSessionView("child-idle", "root", "idle", state.AttnInactive),
+	}
+	_, counts := visibleSessions(rows, true)
+	if counts["inst-1"] != 1 {
+		t.Fatalf("inactive count = %d, want 1 (root only, child-idle is hidden subagent)", counts["inst-1"])
+	}
+}
+
+func TestProcessBellTransitionsFiresOnceWhileAttentionStable(t *testing.T) {
+	bellSent := map[rowKey]state.Attention{}
+	row := state.SessionView{
+		InstanceID: "inst-1",
+		SessionID:  "s1",
+		Attention:  state.AttnPermissionPending,
+	}
+
+	first := processBellTransitions([]state.SessionView{row}, bellSent)
+	if len(first) != 1 {
+		t.Fatalf("first snapshot fired %d bells, want 1", len(first))
+	}
+	second := processBellTransitions([]state.SessionView{row}, bellSent)
+	if len(second) != 0 {
+		t.Fatalf("second snapshot in same attention fired %d bells, want 0", len(second))
+	}
+	third := processBellTransitions([]state.SessionView{row}, bellSent)
+	if len(third) != 0 {
+		t.Fatalf("third snapshot in same attention fired %d bells, want 0", len(third))
+	}
+}
+
+func TestProcessBellTransitionsFiresAgainAfterLeavingAttention(t *testing.T) {
+	bellSent := map[rowKey]state.Attention{}
+	pending := state.SessionView{
+		InstanceID: "inst-1",
+		SessionID:  "s1",
+		Attention:  state.AttnPermissionPending,
+	}
+	calm := pending
+	calm.Attention = state.AttnInactive
+
+	if got := processBellTransitions([]state.SessionView{pending}, bellSent); len(got) != 1 {
+		t.Fatalf("entry into attention fired %d bells, want 1", len(got))
+	}
+	if got := processBellTransitions([]state.SessionView{calm}, bellSent); len(got) != 0 {
+		t.Fatalf("leaving attention fired %d bells, want 0", len(got))
+	}
+	if _, ok := bellSent[rowKey{instanceID: "inst-1", sessionID: "s1"}]; ok {
+		t.Fatalf("bellSent must clear once a session leaves attention")
+	}
+	if got := processBellTransitions([]state.SessionView{pending}, bellSent); len(got) != 1 {
+		t.Fatalf("re-entry into attention fired %d bells, want 1", len(got))
+	}
+}
+
+func TestProcessBellTransitionsFiresOnAttentionTypeChange(t *testing.T) {
+	bellSent := map[rowKey]state.Attention{}
+	perm := state.SessionView{
+		InstanceID: "inst-1",
+		SessionID:  "s1",
+		Attention:  state.AttnPermissionPending,
+	}
+	errored := perm
+	errored.Attention = state.AttnErrored
+
+	if got := processBellTransitions([]state.SessionView{perm}, bellSent); len(got) != 1 {
+		t.Fatalf("first attention fired %d bells, want 1", len(got))
+	}
+	if got := processBellTransitions([]state.SessionView{errored}, bellSent); len(got) != 1 {
+		t.Fatalf("attention type change fired %d bells, want 1", len(got))
+	}
+}
+
+func TestProcessBellTransitionsPrunesDisappearedSessions(t *testing.T) {
+	bellSent := map[rowKey]state.Attention{}
+	row := state.SessionView{
+		InstanceID: "inst-1",
+		SessionID:  "s1",
+		Attention:  state.AttnPermissionPending,
+	}
+	processBellTransitions([]state.SessionView{row}, bellSent)
+	if len(bellSent) != 1 {
+		t.Fatalf("bellSent len = %d, want 1", len(bellSent))
+	}
+	processBellTransitions(nil, bellSent)
+	if len(bellSent) != 0 {
+		t.Fatalf("disappeared session should be pruned, bellSent = %+v", bellSent)
+	}
+}
