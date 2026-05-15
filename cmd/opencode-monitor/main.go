@@ -382,7 +382,23 @@ func (m model) View() string {
 		fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  a to %s inactive  ·  q to quit",
 			live, recent, int(recentWindow.Minutes()), m.snap.UpdatedAt.Format("15:04:05"),
 			toggleVerb(m.inactiveCollapsed)))
-	return header + "\n" + body
+	return header + "\n" + body + "\n" + legendLine()
+}
+
+// legendLine maps each glyph to its meaning so users can decode the
+// STATE column without memorising the palette. Glyphs render in their
+// attention colour; the labels are dim so the colour carries meaning.
+func legendLine() string {
+	parts := []string{
+		dimStyle.Render("legend:"),
+		attnActiveStyle.Render(glyphActive) + " " + dimStyle.Render("active"),
+		attnInactiveStyle.Render(glyphInactive) + " " + dimStyle.Render("inactive"),
+		recentStyle.Render(glyphRecent) + " " + dimStyle.Render("recent"),
+		attnQuestionStyle.Render(glyphQuestion) + " " + dimStyle.Render("question"),
+		attnPermStyle.Render(glyphPermission) + " " + dimStyle.Render("permission"),
+		attnErrStyle.Render(glyphError) + " " + dimStyle.Render("error"),
+	}
+	return strings.Join(parts, "  ")
 }
 
 func toggleVerb(collapsed bool) string {
