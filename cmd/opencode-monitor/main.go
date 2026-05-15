@@ -469,50 +469,34 @@ func (m model) renderAllSessions(width int, rows []state.SessionView, recentByIn
 	if now.IsZero() {
 		now = time.Now()
 	}
-	groups := map[string][]state.SessionView{}
+	// Single flat tree across all instances: live rows fill the top of
+	// the pane, then a unified "▸ N recent" header acts as the divider
+	// for the (optional) recent rows underneath. Per-instance grouping
+	// was dropped because users want recent sessions at the bottom of
+	// the list, not at the bottom of every per-instance subgroup.
+	var live, recent []state.SessionView
 	for _, sv := range rows {
-		groups[sv.InstanceName] = append(groups[sv.InstanceName], sv)
-	}
-	keySet := map[string]struct{}{}
-	for k := range groups {
-		keySet[k] = struct{}{}
-	}
-	for k := range recentByInstance {
-		keySet[k] = struct{}{}
-	}
-	keys := make([]string, 0, len(keySet))
-	for k := range keySet {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for i, k := range keys {
-		if i > 0 {
-			b.WriteString("\n")
+		if sv.Source == state.SourceRecent {
+			recent = append(recent, sv)
+		} else {
+			live = append(live, sv)
 		}
-		// Split each instance group into a live tree and a recent tree
-		// so the visual structure is unambiguous: live rows first, then
-		// the "▾ N recent" header acting as a section divider, then the
-		// recent rows underneath (only when expanded).
-		var live, recent []state.SessionView
-		for _, sv := range groups[k] {
-			if sv.Source == state.SourceRecent {
-				recent = append(recent, sv)
-			} else {
-				live = append(live, sv)
-			}
+	}
+	if len(live) > 0 {
+		b.WriteString(renderTree(now, live, width-2))
+	}
+	totalRecent := 0
+	for _, n := range recentByInstance {
+		totalRecent += n
+	}
+	if totalRecent > 0 {
+		marker := "▸"
+		if !m.recentCollapsed {
+			marker = "▾"
 		}
-		if len(live) > 0 {
-			b.WriteString(renderTree(now, live, width-2))
-		}
-		if n := recentByInstance[k]; n > 0 {
-			marker := "▸"
-			if !m.recentCollapsed {
-				marker = "▾"
-			}
-			b.WriteString(dimStyle.Render(fmt.Sprintf("%s %d recent", marker, n)) + "\n")
-			if !m.recentCollapsed && len(recent) > 0 {
-				b.WriteString(renderTree(now, recent, width-2))
-			}
+		b.WriteString(dimStyle.Render(fmt.Sprintf("%s %d recent", marker, totalRecent)) + "\n")
+		if !m.recentCollapsed && len(recent) > 0 {
+			b.WriteString(renderTree(now, recent, width-2))
 		}
 	}
 	return b.String()

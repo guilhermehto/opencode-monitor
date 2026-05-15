@@ -384,3 +384,59 @@ func TestRenderAllSessionsCollapsedHidesRecentRowsButKeepsMarker(t *testing.T) {
 		t.Fatalf("collapsed view must still show recent count marker, got %q", rendered)
 	}
 }
+func TestRenderAllSessionsRecentSectionIsUnifiedAtBottom(t *testing.T) {
+	// Two instances: live rows from each, plus one recent row in each.
+	// The unified pane should render BOTH live rows above the single
+	// "▾ N recent" header (sum across instances), then both recent rows
+	// underneath when expanded.
+	m := model{width: 200, snap: state.Snapshot{UpdatedAt: time.Unix(0, 0)}}
+
+	liveA := liveSessionView("liveA-id", "", "busy", state.AttnActive)
+	liveA.InstanceID = "instA"
+	liveA.InstanceName = "instA"
+	liveA.Title = "live-A-title"
+
+	liveB := liveSessionView("liveB-id", "", "busy", state.AttnActive)
+	liveB.InstanceID = "instB"
+	liveB.InstanceName = "instB"
+	liveB.Title = "live-B-title"
+
+	recentA := recentSessionView("recentA-id", "", "idle", state.AttnInactive)
+	recentA.InstanceID = "instA"
+	recentA.InstanceName = "instA"
+	recentA.Title = "recent-A-title"
+
+	recentB := recentSessionView("recentB-id", "", "idle", state.AttnInactive)
+	recentB.InstanceID = "instB"
+	recentB.InstanceName = "instB"
+	recentB.Title = "recent-B-title"
+
+	rendered := m.renderAllSessions(200, []state.SessionView{liveA, liveB, recentA, recentB},
+		map[string]int{"instA": 1, "instB": 1})
+
+	liveAPos := strings.Index(rendered, "live-A-title")
+	liveBPos := strings.Index(rendered, "live-B-title")
+	markerPos := strings.Index(rendered, "2 recent")
+	recentAPos := strings.Index(rendered, "recent-A-title")
+	recentBPos := strings.Index(rendered, "recent-B-title")
+
+	if liveAPos < 0 || liveBPos < 0 || markerPos < 0 || recentAPos < 0 || recentBPos < 0 {
+		t.Fatalf("missing fragment in rendered output: %q", rendered)
+	}
+	// Every live row must precede the unified marker, and every recent
+	// row must follow it. Order within live/recent groups is governed
+	// by renderTree (covered elsewhere); here we only assert the
+	// section-level placement.
+	if liveAPos > markerPos || liveBPos > markerPos {
+		t.Fatalf("expected live rows before recent marker; live-A=%d live-B=%d marker=%d", liveAPos, liveBPos, markerPos)
+	}
+	if recentAPos < markerPos || recentBPos < markerPos {
+		t.Fatalf("expected recent rows after recent marker; recent-A=%d recent-B=%d marker=%d", recentAPos, recentBPos, markerPos)
+	}
+	// Marker count must sum recents across instances, not display per-instance counts.
+	// (Use the dimmed "▾ 2 recent" / "▸ 2 recent" form so titles like
+	// "recent-A-title" don't false-match.)
+	if strings.Count(rendered, "▾ 2 recent") + strings.Count(rendered, "▸ 2 recent") != 1 {
+		t.Fatalf("expected exactly one unified recent marker line, got rendered=%q", rendered)
+	}
+}
