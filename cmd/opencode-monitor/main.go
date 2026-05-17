@@ -692,12 +692,14 @@ func formatRow(now time.Time, sv state.SessionView, width int, child bool) strin
 	if sessionW < 1 {
 		sessionW = 1
 	}
-	// Mirror the SESSION column's "  ↳ " prefix in the STATE cell for
-	// subagents so the glyph reads as nested under its parent rather
-	// than as a sibling running session. Fits exactly in colStateW=5.
+	// Prepend a dim "↳" to the STATE glyph for subagents so the dot
+	// reads as nested under its parent rather than as a sibling
+	// running session. The arrow itself supplies the visual indent;
+	// no leading spaces are needed, which keeps the cell within
+	// colStateW=5 ("↳ " + glyph = 3 cells).
 	stateCell := attnLabel(sv.Attention, sv.Source)
 	if child {
-		stateCell = dimStyle.Render("  ↳ ") + stateCell
+		stateCell = dimStyle.Render("↳ ") + stateCell
 	}
 	cells := []string{
 		padCell(stateCell, colStateW, lipgloss.Left),

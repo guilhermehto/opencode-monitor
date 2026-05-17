@@ -604,6 +604,49 @@ func TestFormatRowOmitsDirectoryOnChild(t *testing.T) {
 	}
 }
 
+// TestFormatRowChildStateCellWithinColumn pins the rule that the
+// subagent indent fits inside colStateW. If the "↳ " + glyph cell
+// overflows the STATE column, padCell short-circuits the pad and
+// every downstream cell shifts right — header and child row stop
+// sharing a column origin. The test asserts (1) the total row
+// width still equals the requested width (so columns stayed
+// aligned across the row), and (2) the STATUS column's value
+// lands at the same cell offset for parent and child rows (which
+// is the visible symptom of any STATE-cell overflow).
+func TestFormatRowChildStateCellWithinColumn(t *testing.T) {
+	width := 120
+	now := time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC)
+	sv := state.SessionView{
+		SessionID:    "child",
+		ParentID:     "root",
+		Title:        "child-work",
+		Agent:        "scribe",
+		StatusType:   "busy",
+		Attention:    state.AttnActive,
+		Source:       state.SourceLive,
+		LastActivity: now.Add(-5 * time.Minute),
+	}
+	childRow := formatRow(now, sv, width, true)
+	if rw := lipgloss.Width(childRow); rw != width {
+		t.Fatalf("child row visible width = %d, want %d (%q)", rw, width, childRow)
+	}
+
+	parentSv := sv
+	parentSv.ParentID = ""
+	parentSv.Directory = ""
+	parentRow := formatRow(now, parentSv, width, false)
+	parentBusy := cellOffsetAfter(parentRow, "busy")
+	childBusy := cellOffsetAfter(childRow, "busy")
+	if parentBusy < 0 || childBusy < 0 {
+		t.Fatalf("missing 'busy' fragment: parent=%d child=%d\nparent=%q\nchild=%q",
+			parentBusy, childBusy, parentRow, childRow)
+	}
+	if parentBusy != childBusy {
+		t.Errorf("STATUS value ends at cell %d on parent, %d on child; child STATE indent overflowed colStateW\nparent=%q\nchild=%q",
+			parentBusy, childBusy, parentRow, childRow)
+	}
+}
+
 // TestFormatRowActivityUnderActivityHeader pins the same invariant
 // for the ACTIVITY column.
 func TestFormatRowActivityUnderActivityHeader(t *testing.T) {
