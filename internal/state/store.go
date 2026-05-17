@@ -40,6 +40,11 @@ type SessionView struct {
 	Source       Source
 	Attention    Attention
 	LastActivity time.Time
+	// Created is the session's initiation time, set once when opencode
+	// creates the session. Used by the TUI to impose a stable row order
+	// that doesn't shuffle on every message tick. Zero until the
+	// /session/{id} fetch resolves for an SSE-discovered session.
+	Created time.Time
 }
 
 type Snapshot struct {
@@ -548,6 +553,10 @@ func (s *Store) snapshot() Snapshot {
 	best := map[string]candidate{}
 	for _, inst := range s.instances {
 		for _, row := range inst.sessions {
+			var created time.Time
+			if row.info.Time.Created > 0 {
+				created = time.UnixMilli(row.info.Time.Created)
+			}
 			sv := SessionView{
 				InstanceID:   inst.id,
 				InstanceName: inst.name,
@@ -561,6 +570,7 @@ func (s *Store) snapshot() Snapshot {
 				Source:       row.source,
 				Attention:    Classify(row.status.Type, row.hasPerm, row.hasQuestion, row.lastError, row.lastActivity),
 				LastActivity: row.lastActivity,
+				Created:      created,
 			}
 			cand := candidate{view: sv, live: row.source == SourceLive}
 			cur, ok := best[sv.SessionID]

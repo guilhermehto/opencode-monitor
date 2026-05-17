@@ -44,6 +44,11 @@ One pane:
     after the title (e.g. `Fix flaky test  ~/src/foo`); paths under
     `$HOME` are abbreviated to `~`. Subagent rows omit the directory
     since they inherit their parent's cwd.
+    Live rows are sorted by initiation time (oldest first), so rows
+    don't dance around on every message tick. Sessions needing user
+    action (pending permission, pending question, unresolved error)
+    pin to the top of the live block; everything else holds its slot
+    once initiation times resolve.
   - **Recent** rows (dim, italic `recent` label): pulled from each instance's
     project session list, filtered to those updated in the last 30 minutes.
     Promoted to "live" the moment any event arrives for them.

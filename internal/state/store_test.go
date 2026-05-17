@@ -76,6 +76,47 @@ func TestApplyEventUnknownTypeDoesNotPublish(t *testing.T) {
 	}
 }
 
+func TestSnapshotCarriesCreated(t *testing.T) {
+	ctx := context.Background()
+	s := New(ctx)
+	inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 1}
+	s.AddInstance(inst)
+
+	sess := makeSession("A", 2_000)
+	sess.Time.Created = 1_700_000
+	s.SyncRecent(inst.ID, []oc.Session{sess})
+
+	snap := s.snapshot()
+	if len(snap.Sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(snap.Sessions))
+	}
+	want := time.UnixMilli(1_700_000)
+	if !snap.Sessions[0].Created.Equal(want) {
+		t.Fatalf("Created = %v, want %v", snap.Sessions[0].Created, want)
+	}
+}
+
+func TestSnapshotCreatedZeroWhenAbsent(t *testing.T) {
+	ctx := context.Background()
+	s := New(ctx)
+	inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 1}
+	s.AddInstance(inst)
+
+	// makeSession does not set Time.Created, so it stays zero on the
+	// wire. The view must mirror that so the renderer's fallback path
+	// (LastActivity DESC) kicks in instead of treating the row as
+	// "born at the Unix epoch".
+	s.SyncRecent(inst.ID, []oc.Session{makeSession("A", 2_000)})
+
+	snap := s.snapshot()
+	if len(snap.Sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(snap.Sessions))
+	}
+	if !snap.Sessions[0].Created.IsZero() {
+		t.Fatalf("Created = %v, want zero", snap.Sessions[0].Created)
+	}
+}
+
 func TestSnapshotSortBreaksLastActivityTiesBySessionID(t *testing.T) {
 	ctx := context.Background()
 	s := New(ctx)

@@ -498,7 +498,7 @@ func (m model) renderAllSessions(width int, rows []state.SessionView, recentByIn
 		}
 	}
 	if len(live) > 0 {
-		b.WriteString(renderTree(now, live, width-2))
+		b.WriteString(renderTree(now, live, width-2, sortLiveRows))
 	}
 	totalRecent := 0
 	for _, n := range recentByInstance {
@@ -511,7 +511,7 @@ func (m model) renderAllSessions(width int, rows []state.SessionView, recentByIn
 		}
 		b.WriteString(dimStyle.Render(fmt.Sprintf("%s %d recent", marker, totalRecent)) + "\n")
 		if !m.recentCollapsed && len(recent) > 0 {
-			b.WriteString(renderTree(now, recent, width-2))
+			b.WriteString(renderTree(now, recent, width-2, sortRecentRows))
 		}
 	}
 	return b.String()
@@ -552,7 +552,13 @@ func columnHeader(width int) string {
 	return strings.Join(cells, strings.Repeat(" ", colGap))
 }
 
-func renderTree(now time.Time, rows []state.SessionView, width int) string {
+// renderTree formats a homogeneous slice (all-live or all-recent)
+// into a tree of root rows with their subagents nested underneath.
+// The sort policy is passed in by the caller so the live and recent
+// blocks can stay on different ordering rules: live wants stable,
+// attention-pinned Created ASC; recent wants LastActivity DESC since
+// those rows are static by definition.
+func renderTree(now time.Time, rows []state.SessionView, width int, sortRows func([]state.SessionView)) string {
 	byParent := map[string][]state.SessionView{}
 	knownIDs := map[string]bool{}
 	for _, r := range rows {
@@ -566,32 +572,80 @@ func renderTree(now time.Time, rows []state.SessionView, width int) string {
 			roots = append(roots, r)
 		}
 	}
-	// Sort: live first, then by recency.
-	sort.Slice(roots, func(i, j int) bool {
-		li, lj := roots[i].Source == state.SourceLive, roots[j].Source == state.SourceLive
-		if li != lj {
-			return li
-		}
-		if roots[i].LastActivity.Equal(roots[j].LastActivity) {
-			return roots[i].SessionID < roots[j].SessionID
-		}
-		return roots[i].LastActivity.After(roots[j].LastActivity)
-	})
+	sortRows(roots)
 	var b strings.Builder
 	for _, r := range roots {
 		b.WriteString(formatRow(now, r, width, false) + "\n")
 		kids := byParent[r.SessionID]
-		sort.Slice(kids, func(i, j int) bool {
-			if kids[i].LastActivity.Equal(kids[j].LastActivity) {
-				return kids[i].SessionID < kids[j].SessionID
-			}
-			return kids[i].LastActivity.After(kids[j].LastActivity)
-		})
+		sortRows(kids)
 		for _, c := range kids {
 			b.WriteString(formatRow(now, c, width, true) + "\n")
 		}
 	}
 	return b.String()
+}
+
+// sortLiveRows imposes a stable order on a homogeneous slice of live
+// session rows (either all live roots or one parent's kids).
+//
+// Policy:
+//  1. Two attention bands: rows whose Attention.Rank() < 2
+//     (permission/question/errored) sort above the rest. AttnActive
+//     deliberately shares the lower band with AttnInactive so a session
+//     flipping busy ↔ idle between turns does not reshuffle rows.
+//  2. Within each band: Created ascending — oldest session at the top,
+//     new sessions drop in at the bottom of their band. Created is set
+//     once at session start, so this key never changes on its own.
+//  3. Fallbacks: when both Created values are zero (info fetch still
+//     pending) use LastActivity descending; when only one is zero, the
+//     row with a real Created value wins so resolved rows outrank
+//     not-yet-resolved ones inside the same band.
+//  4. Final tiebreaker: SessionID lexicographic, for determinism.
+func sortLiveRows(rows []state.SessionView) {
+	sort.Slice(rows, func(i, j int) bool {
+		bi := rows[i].Attention.Rank() < 2
+		bj := rows[j].Attention.Rank() < 2
+		if bi != bj {
+			return bi
+		}
+		ci, cj := rows[i].Created, rows[j].Created
+		iZero, jZero := ci.IsZero(), cj.IsZero()
+		switch {
+		case !iZero && !jZero:
+			// Both resolved: oldest first. If equal, fall through
+			// to the SessionID tiebreaker below.
+			if !ci.Equal(cj) {
+				return ci.Before(cj)
+			}
+		case iZero != jZero:
+			// One side still waiting on its /session/{id} fetch:
+			// the resolved row outranks the unresolved one.
+			return !iZero
+		default:
+			// Both unresolved: lean on LastActivity DESC so the
+			// most recently touched row floats to the top of this
+			// transient subset until Created lands.
+			if !rows[i].LastActivity.Equal(rows[j].LastActivity) {
+				return rows[i].LastActivity.After(rows[j].LastActivity)
+			}
+		}
+		return rows[i].SessionID < rows[j].SessionID
+	})
+}
+
+// sortRecentRows orders the (separately-rendered) recent block. Recent
+// rows are static — they're snapshots from /session, not live SSE
+// feeds — so the historical "most recently touched first" order is
+// both natural and immune to the per-tick churn that motivated the
+// live-block redesign. Kept distinct from sortLiveRows so the two
+// blocks can evolve independently.
+func sortRecentRows(rows []state.SessionView) {
+	sort.Slice(rows, func(i, j int) bool {
+		if !rows[i].LastActivity.Equal(rows[j].LastActivity) {
+			return rows[i].LastActivity.After(rows[j].LastActivity)
+		}
+		return rows[i].SessionID < rows[j].SessionID
+	})
 }
 
 func formatRow(now time.Time, sv state.SessionView, width int, child bool) string {
@@ -604,9 +658,10 @@ func formatRow(now time.Time, sv state.SessionView, width int, child bool) strin
 	}
 	title = trimAgentSuffix(title, sv.Agent)
 
-	// The subagent indent lives inside the SESSION cell (not before
-	// the STATE glyph) so STATE stays column-aligned across parents
-	// and children.
+	// Subagent rows get a dim "↳" prefix in the SESSION cell; the
+	// STATE cell gets a matching indent below (see stateCell). The
+	// two prefixes together make the hierarchy unambiguous so a
+	// parent + active subagent doesn't read as two siblings.
 	prefix := ""
 	if child {
 		prefix = dimStyle.Render("  ↳ ")
@@ -637,8 +692,15 @@ func formatRow(now time.Time, sv state.SessionView, width int, child bool) strin
 	if sessionW < 1 {
 		sessionW = 1
 	}
+	// Mirror the SESSION column's "  ↳ " prefix in the STATE cell for
+	// subagents so the glyph reads as nested under its parent rather
+	// than as a sibling running session. Fits exactly in colStateW=5.
+	stateCell := attnLabel(sv.Attention, sv.Source)
+	if child {
+		stateCell = dimStyle.Render("  ↳ ") + stateCell
+	}
 	cells := []string{
-		padCell(attnLabel(sv.Attention, sv.Source), colStateW, lipgloss.Left),
+		padCell(stateCell, colStateW, lipgloss.Left),
 		padCell(sessionContent, sessionW, lipgloss.Left),
 		padCell(styledStatus(sv.StatusType), colStatusW, lipgloss.Right),
 		padCell(dimStyle.Render(formatRelative(now, sv.LastActivity)), colActivityW, lipgloss.Right),
