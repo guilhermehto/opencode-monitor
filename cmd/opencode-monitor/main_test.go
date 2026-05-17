@@ -509,6 +509,101 @@ func TestFormatRowStatusUnderStatusHeader(t *testing.T) {
 	}
 }
 
+// TestShortenDirectory pins the rules for the CWD suffix: $HOME
+// becomes "~", a path under $HOME becomes "~/<rest>", anything else
+// is returned unchanged, and an empty input round-trips to "" so
+// callers can append unconditionally.
+func TestShortenDirectory(t *testing.T) {
+	prev := homeDir
+	defer func() { homeDir = prev }()
+	homeDir = "/home/me"
+
+	cases := []struct {
+		in, want string
+	}{
+		{"", ""},
+		{"/home/me", "~"},
+		{"/home/me/src/foo", "~/src/foo"},
+		{"/home/me/src/foo/bar/baz", "~/src/foo/bar/baz"},
+		{"/tmp/work", "/tmp/work"},
+		// Prefix-only match (no trailing slash + path) must NOT
+		// rewrite — "/home/melissa" is a different user, not a
+		// subpath of "/home/me".
+		{"/home/melissa/src", "/home/melissa/src"},
+	}
+	for _, c := range cases {
+		if got := shortenDirectory(c.in); got != c.want {
+			t.Errorf("shortenDirectory(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestShortenDirectoryNoHome(t *testing.T) {
+	prev := homeDir
+	defer func() { homeDir = prev }()
+	homeDir = ""
+	// With $HOME unresolved we must not substitute anything; the
+	// path is returned verbatim so the display still identifies
+	// the session's project.
+	if got := shortenDirectory("/Users/g/src/foo"); got != "/Users/g/src/foo" {
+		t.Errorf("shortenDirectory with empty homeDir = %q, want path unchanged", got)
+	}
+}
+
+// TestFormatRowShowsShortenedDirectory pins the actual rendering: a
+// root row with a non-empty Directory appends the home-relative form
+// after the title, dim-styled. We assert on the visible substring
+// (lipgloss escape codes are wrapped around the literal text, not
+// interleaved with it).
+func TestFormatRowShowsShortenedDirectory(t *testing.T) {
+	prev := homeDir
+	defer func() { homeDir = prev }()
+	homeDir = "/home/me"
+
+	sv := state.SessionView{
+		SessionID:  "s1",
+		Title:      "alpha",
+		Directory:  "/home/me/src/foo",
+		StatusType: "busy",
+		Attention:  state.AttnActive,
+		Source:     state.SourceLive,
+	}
+	row := formatRow(time.Now(), sv, 120, false)
+	if !strings.Contains(row, "~/src/foo") {
+		t.Fatalf("row = %q, want shortened directory ~/src/foo", row)
+	}
+	// Raw path must not leak alongside the shortened form.
+	if strings.Contains(row, "/home/me/src/foo") {
+		t.Fatalf("row = %q, want raw $HOME path replaced", row)
+	}
+}
+
+// TestFormatRowOmitsDirectoryOnChild pins the "subagents inherit the
+// parent's cwd, so don't repeat it on the ↳ row" rule. If this ever
+// needs to flip to "show only when different from parent", that's a
+// renderTree-level change because the parent's directory has to flow
+// in alongside the child row.
+func TestFormatRowOmitsDirectoryOnChild(t *testing.T) {
+	prev := homeDir
+	defer func() { homeDir = prev }()
+	homeDir = "/home/me"
+
+	sv := state.SessionView{
+		SessionID:  "child",
+		ParentID:   "root",
+		Title:      "child-work",
+		Directory:  "/home/me/src/foo",
+		Agent:      "scribe",
+		StatusType: "busy",
+		Attention:  state.AttnActive,
+		Source:     state.SourceLive,
+	}
+	row := formatRow(time.Now(), sv, 120, true)
+	if strings.Contains(row, "~/src/foo") || strings.Contains(row, "/home/me/src/foo") {
+		t.Fatalf("child row = %q, must not render directory", row)
+	}
+}
+
 // TestFormatRowActivityUnderActivityHeader pins the same invariant
 // for the ACTIVITY column.
 func TestFormatRowActivityUnderActivityHeader(t *testing.T) {

@@ -40,6 +40,10 @@ One pane:
     Subagents nest under their parent with `↳` and an `@agent-name` tag.
     Finished subagents (`idle`/empty status) are hidden unless they have a
     pending permission request, pending question, or an unresolved error.
+    Each root row shows the session's working directory dim-suffixed
+    after the title (e.g. `Fix flaky test  ~/src/foo`); paths under
+    `$HOME` are abbreviated to `~`. Subagent rows omit the directory
+    since they inherit their parent's cwd.
   - **Recent** rows (dim, italic `recent` label): pulled from each instance's
     project session list, filtered to those updated in the last 30 minutes.
     Promoted to "live" the moment any event arrives for them.

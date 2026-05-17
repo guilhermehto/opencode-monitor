@@ -623,6 +623,15 @@ func formatRow(now time.Time, sv state.SessionView, width int, child bool) strin
 	if agentTag != "" {
 		sessionContent = prefix + agentTag + " " + titleRender
 	}
+	// CWD suffix: only on root rows. Subagents inherit their parent's
+	// directory in opencode, so repeating it on every "↳" row would be
+	// noise. If a subagent ever runs in a different cwd, that
+	// divergence is worth surfacing — leaving room for a future
+	// "show only when child differs from parent" pass without
+	// changing this signature today.
+	if !child && sv.Directory != "" {
+		sessionContent += "  " + dimStyle.Render(shortenDirectory(sv.Directory))
+	}
 
 	sessionW := width - colStateW - colStatusW - colActivityW - 3*colGap
 	if sessionW < 1 {
@@ -646,6 +655,40 @@ func trimAgentSuffix(title, agent string) string {
 		return strings.TrimSuffix(title, suffix)
 	}
 	return title
+}
+
+// homeDir is resolved once at startup; render-path helpers use it to
+// abbreviate session directories under $HOME as "~/…". Falls back to
+// empty on lookup failure, which makes shortenDirectory a no-op.
+var homeDir = func() string {
+	if h, err := os.UserHomeDir(); err == nil {
+		return h
+	}
+	return ""
+}()
+
+// shortenDirectory rewrites an absolute session directory into the
+// compact form used in the SESSION cell. A path under $HOME becomes
+// "~/<rest>"; everything else is returned unchanged. An empty input
+// returns an empty string so callers can append unconditionally.
+//
+// Truncation past the cell width is deliberately not handled here:
+// formatRow already tolerates overflow for long titles (see padCell),
+// and adding a separate truncation policy for directories would
+// diverge from that established behaviour.
+func shortenDirectory(path string) string {
+	if path == "" {
+		return ""
+	}
+	if homeDir != "" {
+		if path == homeDir {
+			return "~"
+		}
+		if strings.HasPrefix(path, homeDir+"/") {
+			return "~" + path[len(homeDir):]
+		}
+	}
+	return path
 }
 
 func main() {
