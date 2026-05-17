@@ -114,6 +114,40 @@ func TestFormatRowAgentBeforeTitleAndDedupesAgentSuffix(t *testing.T) {
 	}
 }
 
+// TestTrimAgentSuffix covers the variants opencode actually produces:
+// the parens content can differ in case, can be a display name that
+// doesn't byte-match sv.Agent, and can have trailing whitespace. All
+// must collapse to a clean title so the @agent tag isn't duplicated.
+// Negative cases pin the "no agent → keep parens" and "no balanced
+// parens → keep title" guards.
+func TestTrimAgentSuffix(t *testing.T) {
+	cases := []struct {
+		name  string
+		title string
+		agent string
+		want  string
+	}{
+		{"exact match", "refactor parser (scribe)", "scribe", "refactor parser"},
+		{"case mismatch", "refactor parser (Scribe)", "scribe", "refactor parser"},
+		{"display vs canonical", "refactor parser (general-purpose)", "general", "refactor parser"},
+		{"trailing whitespace", "refactor parser (scribe)  ", "scribe", "refactor parser"},
+		{"nested parens", "Foo (bar (baz))", "scribe", "Foo"},
+		{"no agent keeps parens", "Fix bug (urgent)", "", "Fix bug (urgent)"},
+		{"no trailing parens", "refactor parser", "scribe", "refactor parser"},
+		{"whole title parenthesised", "(scribe)", "scribe", "(scribe)"},
+		{"unbalanced parens", "refactor parser scribe)", "scribe", "refactor parser scribe)"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := trimAgentSuffix(tc.title, tc.agent)
+			if got != tc.want {
+				t.Fatalf("trimAgentSuffix(%q, %q) = %q, want %q", tc.title, tc.agent, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRenderAllSessionsRedactsInstanceHostPort(t *testing.T) {
 	m := model{}
 	rows := []state.SessionView{

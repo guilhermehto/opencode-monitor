@@ -710,15 +710,49 @@ func formatRow(now time.Time, sv state.SessionView, width int, child bool) strin
 	return strings.Join(cells, strings.Repeat(" ", colGap))
 }
 
+// trimAgentSuffix strips a trailing parenthetical from a subagent
+// title. opencode appends the agent identifier to subagent session
+// titles (e.g. "refactor parser (scribe)"), but the exact contents
+// of the parens — case, display name vs canonical name, internal
+// whitespace — can drift from sv.Agent. A strict literal match
+// against " (" + agent + ")" lets those variants leak through and
+// the row ends up showing the agent twice (once as the @scribe tag
+// we prepend, once in the title's parens). Instead, when agent is
+// set, treat any balanced trailing "(...)" group as the opencode
+// annotation and strip it. Nested parens are handled by tracking
+// depth so titles like "Foo (bar (baz))" collapse to "Foo". For
+// root agents (agent == ""), behaviour is unchanged — a legitimate
+// title like "Fix bug (urgent)" is preserved.
 func trimAgentSuffix(title, agent string) string {
 	if agent == "" {
 		return title
 	}
-	suffix := " (" + agent + ")"
-	if strings.HasSuffix(title, suffix) {
-		return strings.TrimSuffix(title, suffix)
+	trimmed := strings.TrimRight(title, " \t")
+	if !strings.HasSuffix(trimmed, ")") {
+		return title
 	}
-	return title
+	depth := 0
+	openIdx := -1
+	for i := len(trimmed) - 1; i >= 0; i-- {
+		switch trimmed[i] {
+		case ')':
+			depth++
+		case '(':
+			depth--
+		}
+		if depth == 0 {
+			openIdx = i
+			break
+		}
+	}
+	// Bail if no matching '(' was found, or the matching '(' sits at
+	// position 0 (the whole title is parenthesised — stripping it
+	// would leave us with an empty title, which is worse than the
+	// duplicated agent display).
+	if openIdx <= 0 {
+		return title
+	}
+	return strings.TrimRight(trimmed[:openIdx], " \t")
 }
 
 // homeDir is resolved once at startup; render-path helpers use it to
