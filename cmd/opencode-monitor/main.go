@@ -276,6 +276,21 @@ const (
 	glyphError      = "\U000f0026" // 󰀦
 )
 
+// Column widths for the sessions table. STATE / STATUS / ACTIVITY are
+// fixed; SESSION absorbs the remaining width inside the pane so the
+// header labels and per-row values land in identical cells. Widths are
+// chosen as max(header_label, max_value_width):
+//
+//	STATE    = max("STATE"(5), glyph+pad(2)) = 5
+//	STATUS   = max("STATUS"(6), "generating"(10)) = 10
+//	ACTIVITY = max("ACTIVITY"(8), "999h"(4)) = 8
+const (
+	colStateW    = 5
+	colStatusW   = 10
+	colActivityW = 8
+	colGap       = 2
+)
+
 // attnLabel returns a single coloured glyph plus a trailing space so the
 // STATE column occupies a stable 2-cell footprint regardless of state.
 func attnLabel(a state.Attention, source state.Source) string {
@@ -502,16 +517,39 @@ func (m model) renderAllSessions(width int, rows []state.SessionView, recentByIn
 	return b.String()
 }
 
+// padCell pads s with spaces so it occupies cellWidth visible cells.
+// When align is lipgloss.Left, spaces trail the content; when align
+// is lipgloss.Right, they lead it. Content already wider than
+// cellWidth is returned unchanged (overflow tolerated, matching the
+// legacy behaviour for very long titles).
+func padCell(s string, cellWidth int, align lipgloss.Position) string {
+	w := lipgloss.Width(s)
+	if w >= cellWidth {
+		return s
+	}
+	pad := strings.Repeat(" ", cellWidth-w)
+	if align == lipgloss.Right {
+		return pad + s
+	}
+	return s + pad
+}
+
 // columnHeader renders the dim labels above the trees so users can map
 // each glyph/text fragment back to a logical column without a legend.
+// The labels share their widths with formatRow's cells so headers
+// always land directly above the values they describe.
 func columnHeader(width int) string {
-	left := dimStyle.Render("STATE  AGENT  TITLE")
-	right := dimStyle.Render("STATUS  ACTIVITY")
-	pad := width - lipgloss.Width(left) - lipgloss.Width(right)
-	if pad < 1 {
-		pad = 1
+	sessionW := width - colStateW - colStatusW - colActivityW - 3*colGap
+	if sessionW < 1 {
+		sessionW = 1
 	}
-	return left + strings.Repeat(" ", pad) + right
+	cells := []string{
+		padCell(dimStyle.Render("STATE"), colStateW, lipgloss.Left),
+		padCell(dimStyle.Render("SESSION"), sessionW, lipgloss.Left),
+		padCell(dimStyle.Render("STATUS"), colStatusW, lipgloss.Right),
+		padCell(dimStyle.Render("ACTIVITY"), colActivityW, lipgloss.Right),
+	}
+	return strings.Join(cells, strings.Repeat(" ", colGap))
 }
 
 func renderTree(now time.Time, rows []state.SessionView, width int) string {
@@ -565,6 +603,10 @@ func formatRow(now time.Time, sv state.SessionView, width int, child bool) strin
 		title = sv.SessionID
 	}
 	title = trimAgentSuffix(title, sv.Agent)
+
+	// The subagent indent lives inside the SESSION cell (not before
+	// the STATE glyph) so STATE stays column-aligned across parents
+	// and children.
 	prefix := ""
 	if child {
 		prefix = dimStyle.Render("  ↳ ")
@@ -577,25 +619,22 @@ func formatRow(now time.Time, sv state.SessionView, width int, child bool) strin
 	if sv.Source == state.SourceRecent {
 		titleRender = dimStyle.Render(title)
 	}
-	left := fmt.Sprintf("%s%s  %s", prefix, attnLabel(sv.Attention, sv.Source), titleRender)
+	sessionContent := prefix + titleRender
 	if agentTag != "" {
-		left = fmt.Sprintf("%s%s  %s %s", prefix, attnLabel(sv.Attention, sv.Source), agentTag, titleRender)
+		sessionContent = prefix + agentTag + " " + titleRender
 	}
-	status := styledStatus(sv.StatusType)
-	activity := dimStyle.Render(formatRelative(now, sv.LastActivity))
-	right := activity
-	if status != "" {
-		if activity != "" {
-			right = status + "  " + activity
-		} else {
-			right = status
-		}
+
+	sessionW := width - colStateW - colStatusW - colActivityW - 3*colGap
+	if sessionW < 1 {
+		sessionW = 1
 	}
-	pad := width - lipgloss.Width(left) - lipgloss.Width(right)
-	if pad < 1 {
-		pad = 1
+	cells := []string{
+		padCell(attnLabel(sv.Attention, sv.Source), colStateW, lipgloss.Left),
+		padCell(sessionContent, sessionW, lipgloss.Left),
+		padCell(styledStatus(sv.StatusType), colStatusW, lipgloss.Right),
+		padCell(dimStyle.Render(formatRelative(now, sv.LastActivity)), colActivityW, lipgloss.Right),
 	}
-	return left + strings.Repeat(" ", pad) + right
+	return strings.Join(cells, strings.Repeat(" ", colGap))
 }
 
 func trimAgentSuffix(title, agent string) string {

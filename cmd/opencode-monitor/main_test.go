@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/goliveira/opencode-monitor/internal/state"
 )
 
@@ -438,5 +440,97 @@ func TestRenderAllSessionsRecentSectionIsUnifiedAtBottom(t *testing.T) {
 	// "recent-A-title" don't false-match.)
 	if strings.Count(rendered, "▾ 2 recent") + strings.Count(rendered, "▸ 2 recent") != 1 {
 		t.Fatalf("expected exactly one unified recent marker line, got rendered=%q", rendered)
+	}
+}
+
+// cellOffsetAfter returns the visible cell offset just past the first
+// occurrence of substr in s, or -1 if substr is not found. ANSI escape
+// sequences in s contribute zero visible width.
+func cellOffsetAfter(s, substr string) int {
+	idx := strings.Index(s, substr)
+	if idx < 0 {
+		return -1
+	}
+	return lipgloss.Width(s[:idx+len(substr)])
+}
+
+// TestColumnHeaderAndRowAgreeOnWidth pins the invariant that the
+// header and every data row produce exactly `width` visible cells.
+// When this holds, header labels and row cells are positionally
+// coupled — fix the columns once and the alignment follows for free.
+func TestColumnHeaderAndRowAgreeOnWidth(t *testing.T) {
+	sv := state.SessionView{
+		SessionID:    "s1",
+		Title:        "some title",
+		Agent:        "scribe",
+		StatusType:   "busy",
+		Attention:    state.AttnActive,
+		Source:       state.SourceLive,
+		LastActivity: time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC),
+	}
+	now := time.Date(2026, 5, 15, 12, 5, 0, 0, time.UTC)
+	for _, w := range []int{60, 80, 120, 200} {
+		header := columnHeader(w)
+		row := formatRow(now, sv, w, false)
+		if hw := lipgloss.Width(header); hw != w {
+			t.Errorf("width %d: header visible width = %d, want %d (%q)", w, hw, w, header)
+		}
+		if rw := lipgloss.Width(row); rw != w {
+			t.Errorf("width %d: row visible width = %d, want %d (%q)", w, rw, w, row)
+		}
+	}
+}
+
+// TestFormatRowStatusUnderStatusHeader is the regression test for the
+// original bug: with both status and activity present, "busy" must
+// land under the STATUS header, not under ACTIVITY. Both are
+// right-aligned inside the 10-cell STATUS column, so their trailing
+// cell offsets must coincide.
+func TestFormatRowStatusUnderStatusHeader(t *testing.T) {
+	width := 120
+	header := columnHeader(width)
+	row := formatRow(time.Now(), state.SessionView{
+		SessionID:  "s1",
+		Title:      "alpha",
+		StatusType: "busy",
+		Attention:  state.AttnActive,
+		Source:     state.SourceLive,
+	}, width, false)
+
+	statusEnd := cellOffsetAfter(header, "STATUS")
+	busyEnd := cellOffsetAfter(row, "busy")
+	if statusEnd < 0 || busyEnd < 0 {
+		t.Fatalf("missing fragments: STATUS=%d busy=%d\nheader=%q\nrow=%q",
+			statusEnd, busyEnd, header, row)
+	}
+	if statusEnd != busyEnd {
+		t.Errorf("STATUS ends at cell %d, busy ends at cell %d; both should share the STATUS column's right edge\nheader=%q\nrow=%q",
+			statusEnd, busyEnd, header, row)
+	}
+}
+
+// TestFormatRowActivityUnderActivityHeader pins the same invariant
+// for the ACTIVITY column.
+func TestFormatRowActivityUnderActivityHeader(t *testing.T) {
+	width := 120
+	now := time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC)
+	header := columnHeader(width)
+	row := formatRow(now, state.SessionView{
+		SessionID:    "s1",
+		Title:        "alpha",
+		Attention:    state.AttnInactive,
+		Source:       state.SourceLive,
+		LastActivity: now.Add(-5 * time.Minute),
+	}, width, false)
+
+	activityEnd := cellOffsetAfter(header, "ACTIVITY")
+	valueEnd := cellOffsetAfter(row, "5m")
+	if activityEnd < 0 || valueEnd < 0 {
+		t.Fatalf("missing fragments: ACTIVITY=%d value=%d\nheader=%q\nrow=%q",
+			activityEnd, valueEnd, header, row)
+	}
+	if activityEnd != valueEnd {
+		t.Errorf("ACTIVITY ends at cell %d, 5m ends at cell %d\nheader=%q\nrow=%q",
+			activityEnd, valueEnd, header, row)
 	}
 }
