@@ -1,4 +1,4 @@
-# opencode-monitor
+# cogitator
 
 Throwaway POC: a TUI command centre that gives a **live** multi-session view of
 locally-running [opencode](https://opencode.ai) instances and triages sessions
@@ -18,23 +18,23 @@ opencode --mdns                       # default port (random)
 opencode serve --mdns --port 7777     # headless, fixed port
 ```
 
-You can launch as many as you like; the monitor discovers them automatically.
+You can launch as many as you like; cogitator discovers them automatically.
 
 ## Run
 
 ```sh
-go run ./cmd/opencode-monitor
+go run ./cmd/cogitator
 ```
 
 `q`, `Esc`, or `Ctrl+C` quits. A debug log is written to
-`/tmp/opencode-monitor.log`.
+`/tmp/cogitator.log`.
 
 ## What you'll see
 
 One pane:
 
 - **Sessions**: grouped by instance (separated by blank lines, no host/port labels).
-  - **Live** rows (bright): observed via SSE during this monitor run.
+  - **Live** rows (bright): observed via SSE during this cogitator run.
     `active` means the session is currently doing work (`busy`/`generating`).
     Non-busy top-level sessions render as `inactive`.
     Subagents nest under their parent with `↳` and an `@agent-name` tag.
@@ -55,15 +55,15 @@ One pane:
 
 ## How it works
 
-For each discovered instance the monitor:
+For each discovered instance cogitator:
 
 1. Subscribes to `GET /global/event` (NOT `GET /event`, which is silently
    scoped to the requesting client's directory).
 2. Polls `GET /permission` every 5s so a permission raised before the
-   monitor connected still surfaces.
+   cogitator connected still surfaces.
 3. Polls `GET /session` every 30s and keeps rows whose `time.updated` falls
    within the last 30 minutes — discovery for sessions you were already
-   working on before the monitor started.
+   working on before cogitator started.
 4. Asynchronously fetches `GET /session/{id}` the first time it sees an
    unfamiliar session ID, just to populate title/slug/agent for display.
 

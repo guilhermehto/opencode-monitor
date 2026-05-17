@@ -1,4 +1,4 @@
-module github.com/goliveira/opencode-monitor
+module github.com/goliveira/cogitator
 
 go 1.25.6
 

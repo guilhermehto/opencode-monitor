@@ -7,7 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/goliveira/opencode-monitor/internal/state"
+	"github.com/goliveira/cogitator/internal/state"
 )
 
 func makeSessionView(id, parentID, status string, attn state.Attention) state.SessionView {
@@ -203,7 +203,7 @@ func TestVisibleSessionsCollapseDropsRecentKeepsLive(t *testing.T) {
 	rows := []state.SessionView{
 		// Live rows of every flavour, including inactive — none should be
 		// dropped by the collapse since the user wants to see what the
-		// monitor is currently observing, idle or not.
+		// cogitator is currently observing, idle or not.
 		liveSessionView("calm", "", "idle", state.AttnInactive),
 		liveSessionView("urgent", "", "idle", state.AttnPermissionPending),
 		liveSessionView("question", "", "idle", state.AttnQuestionPending),

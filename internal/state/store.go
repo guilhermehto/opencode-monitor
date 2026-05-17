@@ -2,7 +2,7 @@
 // the view from two sources:
 //
 //   - "live": observed via an SSE event (or pending-permission poll) during
-//     this monitor run. These get the full attention classification.
+//     this cogitator run. These get the full attention classification.
 //   - "recent": imported from /session because they were touched
 //     within the recency window. Treated as discovery context only — they
 //     are still discoverable even when not actively working. Promoted to "live"
@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/goliveira/opencode-monitor/internal/discovery"
-	"github.com/goliveira/opencode-monitor/internal/oc"
+	"github.com/goliveira/cogitator/internal/discovery"
+	"github.com/goliveira/cogitator/internal/oc"
 )
 
 type Source string

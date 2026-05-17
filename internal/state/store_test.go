@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/goliveira/opencode-monitor/internal/discovery"
-	"github.com/goliveira/opencode-monitor/internal/oc"
+	"github.com/goliveira/cogitator/internal/discovery"
+	"github.com/goliveira/cogitator/internal/oc"
 )
 
 func makeSession(id string, updatedMs int64) oc.Session {

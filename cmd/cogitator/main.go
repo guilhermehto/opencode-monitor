@@ -15,9 +15,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/goliveira/opencode-monitor/internal/discovery"
-	"github.com/goliveira/opencode-monitor/internal/oc"
-	"github.com/goliveira/opencode-monitor/internal/state"
+	"github.com/goliveira/cogitator/internal/discovery"
+	"github.com/goliveira/cogitator/internal/oc"
+	"github.com/goliveira/cogitator/internal/state"
 )
 
 const recentWindow = 30 * time.Minute
@@ -368,7 +368,7 @@ func shouldHideSubagent(sv state.SessionView) bool {
 // always drops finished subagents (idle leaf nodes) and reparents
 // surviving children across hidden ancestors. When collapseRecent is
 // true it additionally drops rows whose Source is SourceRecent so the
-// pane fills with sessions the monitor is actively observing instead
+// pane fills with sessions cogitator is actively observing instead
 // of historical context imported from /session.
 //
 // The second return value tracks how many recent rows belong to each
@@ -442,7 +442,7 @@ func (m model) View() string {
 			live++
 		}
 	}
-	header := titleStyle.Render("opencode-monitor") + dimStyle.Render(
+	header := titleStyle.Render("cogitator") + dimStyle.Render(
 		fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  a to %s recent  ·  q to quit",
 			live, recent, int(recentWindow.Minutes()), m.snap.UpdatedAt.Format("15:04:05"),
 			toggleVerb(m.recentCollapsed)))
@@ -760,7 +760,7 @@ func main() {
 	status := flag.Bool("status", false, "print a one-shot icons-only attention summary and exit")
 	flag.Parse()
 
-	logF, err := os.Create("/tmp/opencode-monitor.log")
+	logF, err := os.Create("/tmp/cogitator.log")
 	if err == nil {
 		log.SetOutput(logF)
 		defer logF.Close()

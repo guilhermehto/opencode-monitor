@@ -13,7 +13,7 @@ import (
 // globalEventEnvelope wraps the payload that GET /global/event sends.
 // /global/event delivers events for sessions in every directory; /event is
 // scoped to the requesting client's directory and is silent for an external
-// monitor. Each record looks like:
+// observer like cogitator. Each record looks like:
 //
 //	{"directory":"...","project":"...","payload":{"id":"evt_…","type":"…","properties":{…}}}
 //
