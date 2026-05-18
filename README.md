@@ -1,12 +1,27 @@
 # cogitator
 
-Throwaway POC: a TUI command centre that gives a **live** multi-session view of
-locally-running [opencode](https://opencode.ai) instances and triages sessions
-that need attention (pending permission requests, pending questions, and
-errors), while separating
-active work from inactive context.
+`cogitator` is a terminal monitor for locally running [opencode](https://opencode.ai) instances.
+It discovers instances over mDNS, subscribes to their event streams, and renders one live sessions view with attention signals (permission requests, pending questions, and errors).
 
-**Status:** proof of concept. macOS only. Read-only; no controls. Don't ship.
+## Install
+
+### Go install
+
+```sh
+go install github.com/guilhermehto/cogitator/cmd/cogitator@latest
+```
+
+### Homebrew
+
+Homebrew support is published through `guilhermehto/homebrew-tap` once release automation is configured.
+
+## Supported OS
+
+| OS | Support |
+| --- | --- |
+| macOS | Supported |
+| Linux | Supported |
+| Windows | Not supported |
 
 ## Prerequisite
 
@@ -23,83 +38,75 @@ You can launch as many as you like; cogitator discovers them automatically.
 ## Run
 
 ```sh
+cogitator
+```
+
+or from source:
+
+```sh
 go run ./cmd/cogitator
 ```
 
-`q`, `Esc`, or `Ctrl+C` quits. A debug log is written to
-`/tmp/cogitator.log`.
+`q`, `Esc`, or `Ctrl+C` quits.
 
-## What you'll see
+## CLI reference
 
-One pane:
+- `--bell`: ring the terminal bell when a session transitions into an attention state.
+- `--status`: print a one-shot icons-only status line and exit.
+- `--log-level`: set log verbosity (`debug|info|warn|error`). Default is `info`.
+- `--version`: print module version, commit, and build date.
 
-- **Sessions**: grouped by instance (separated by blank lines, no host/port labels).
-  - **Live** rows (bright): observed via SSE during this cogitator run.
-    `active` means the session is currently doing work (`busy`/`generating`).
-    Non-busy top-level sessions render as `inactive`.
-    Subagents nest under their parent with `↳` and an `@agent-name` tag.
-    Finished subagents (`idle`/empty status) are hidden unless they have a
-    pending permission request, pending question, or an unresolved error.
-    Each root row shows the session's working directory dim-suffixed
-    after the title (e.g. `Fix flaky test  ~/src/foo`); paths under
-    `$HOME` are abbreviated to `~`. Subagent rows omit the directory
-    since they inherit their parent's cwd.
-    Live rows are sorted by initiation time (oldest first), so rows
-    don't dance around on every message tick. Sessions needing user
-    action (pending permission, pending question, unresolved error)
-    pin to the top of the live block; everything else holds its slot
-    once initiation times resolve.
-  - **Recent** rows (dim, italic `recent` label): pulled from each instance's
-    project session list, filtered to those updated in the last 30 minutes.
-    Promoted to "live" the moment any event arrives for them.
+## Logging
 
-## How it works
+Logs are written with `log/slog` text formatting.
 
-For each discovered instance cogitator:
+- If `$XDG_STATE_HOME` is set: `$XDG_STATE_HOME/cogitator/cogitator.log`
+- Otherwise: `/tmp/cogitator.log`
 
-1. Subscribes to `GET /global/event` (NOT `GET /event`, which is silently
-   scoped to the requesting client's directory).
-2. Polls `GET /permission` every 5s so a permission raised before the
-   cogitator connected still surfaces.
-3. Polls `GET /session` every 30s and keeps rows whose `time.updated` falls
-   within the last 30 minutes — discovery for sessions you were already
-   working on before cogitator started.
-4. Asynchronously fetches `GET /session/{id}` the first time it sees an
-   unfamiliar session ID, just to populate title/slug/agent for display.
+## Architecture overview
 
-## What you can't see, and why
+- `internal/discovery`: mDNS browsing and add/remove events for opencode instances.
+- `internal/supervisor`: per-instance lifecycle (permissions poll, recency poll, SSE loop, reconnect backoff).
+- `internal/oc`: HTTP + SSE API access and generated OpenAPI-derived core types.
+- `internal/state`: in-memory aggregation and dedupe across instances, attention classification, unreachable-instance tracking.
+- `internal/ui`: Bubble Tea model, rendering, status mode, and footer warnings.
+- `internal/config`: single source of timing/threshold defaults.
 
-opencode does **not** expose "which session is currently open in this TUI".
-The `/tui/*` endpoints are *control* (tell a TUI to do something), not state
-queries. The TUI process owns its current selection internally and never
-broadcasts it. So the closest proxy is **recency** — sessions touched in the
-last N minutes are the ones you're likely working on. That's what the recent
-import shows.
+## Status mode
 
-opencode also shares **one database across all running processes**:
+`--status` runs discovery/supervision without opening the TUI and prints a compact status line.
+It exits when either:
 
-- `GET /global/event` echoes every event to every connected process.
-- `GET /experimental/session` returns the same global list to every process.
-- `GET /session` is project-scoped to the requesting process's working
-  directory, which is why we use it for recency import — it gives natural
-  per-instance scoping when your opencode instances are in different cwds.
+- a non-empty snapshot arrives, or
+- the status deadline is reached (default: 3s).
 
-If you have two opencode instances started in the **same** cwd, you'll see
-their session lists overlap. That's a faithful reflection of opencode's
-model, not a bug.
+## Notes for macOS unsigned binaries
 
-## Lifecycle
+Current releases are unsigned. If Gatekeeper blocks first launch, either use Finder "Open" once, or clear quarantine:
 
-When an instance disappears (process killed, mDNS announce gone) its sessions
-are silently dropped. When it comes back, the next mDNS browse pass re-adds
-it and the recency import refills its rows.
+```sh
+xattr -d com.apple.quarantine cogitator
+```
 
-## Why throwaway
+## Development
 
-The goal is to validate the pipeline (mDNS → `/global/event` + `/session`
-recency → classifier → TUI) and the sessions-focused UX. A real version would
-replace the ad-hoc HTTP types with a generated client, add interactivity
-(approve permissions, jump into a session), and likely surface opencode's
-TUI-current-session out of band (a small opencode plugin could broadcast
-selection events on `tui.session.select` via `/global/event`, eliminating
-the recency proxy).
+Common local targets:
+
+```sh
+make vet
+make lint
+make test
+make ci
+```
+
+OpenAPI workflow:
+
+```sh
+make capture-schema
+make generate
+```
+
+## Roadmap
+
+- macOS code signing + notarization (blocked on Apple Developer Program enrolment).
+- OpenAPI-derived SSE event payload types (blocked on opencode publishing the event-stream schema).

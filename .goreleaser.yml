@@ -1,0 +1,40 @@
+version: 2
+
+project_name: cogitator
+
+builds:
+  - id: cogitator
+    main: ./cmd/cogitator
+    binary: cogitator
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+brews:
+  - repository:
+      owner: guilhermehto
+      name: homebrew-tap
+    directory: Formula
+    homepage: https://github.com/guilhermehto/cogitator
+    description: Monitor local opencode instances from a single TUI
+    license: MIT
+    test: |
+      system "#{bin}/cogitator", "--status"

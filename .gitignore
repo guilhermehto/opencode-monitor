@@ -1,1 +1,6 @@
 .scriptorum/
+/cogitator
+*.log
+coverage.out
+dist/
+.DS_Store
