@@ -6,11 +6,10 @@ package discovery
 import (
 	"context"
 	"fmt"
-	"io"
-	"log"
 	"strings"
 	"time"
 
+	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/hashicorp/mdns"
 )
 
@@ -35,9 +34,10 @@ const serviceType = "_http._tcp"
 
 // Browse continuously browses for opencode services and emits Event values
 // on the returned channel until ctx is cancelled. Channel closes on exit.
-func Browse(ctx context.Context) (<-chan Event, error) {
-	// hashicorp/mdns logs noisily about IPv6 failures; silence it for the TUI.
-	log.SetOutput(io.Discard)
+func Browse(ctx context.Context, cfg *config.Config) (<-chan Event, error) {
+	if cfg == nil {
+		cfg = config.Default()
+	}
 
 	out := make(chan Event, 16)
 	go func() {
@@ -47,7 +47,7 @@ func Browse(ctx context.Context) (<-chan Event, error) {
 			if ctx.Err() != nil {
 				return
 			}
-			pass := browseOnce(4 * time.Second)
+			pass := browseOnce(cfg.DiscoveryBrowseTimeout)
 			for id, inst := range pass {
 				if _, ok := live[id]; !ok {
 					i := inst
@@ -64,7 +64,7 @@ func Browse(ctx context.Context) (<-chan Event, error) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(3 * time.Second):
+			case <-time.After(cfg.DiscoverySleep):
 			}
 		}
 	}()

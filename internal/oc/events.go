@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/guilhermehto/cogitator/internal/config"
 )
 
 // globalEventEnvelope wraps the payload that GET /global/event sends.
@@ -88,10 +90,13 @@ func (c *Client) SubscribeEvents(ctx context.Context, out chan<- Event) error {
 }
 
 // SleepBackoff returns a simple linear backoff for reconnect loops.
-func SleepBackoff(ctx context.Context, attempt int) {
+func SleepBackoff(ctx context.Context, cfg *config.Config, attempt int) {
+	if cfg == nil {
+		cfg = config.Default()
+	}
 	d := time.Duration(attempt) * time.Second
-	if d > 5*time.Second {
-		d = 5 * time.Second
+	if d > cfg.EventBackoffMax {
+		d = cfg.EventBackoffMax
 	}
 	if d <= 0 {
 		d = time.Second

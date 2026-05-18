@@ -12,12 +12,14 @@ package state
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
 
-	"github.com/goliveira/cogitator/internal/discovery"
-	"github.com/goliveira/cogitator/internal/oc"
+	"github.com/guilhermehto/cogitator/internal/config"
+	"github.com/guilhermehto/cogitator/internal/discovery"
+	"github.com/guilhermehto/cogitator/internal/oc"
 )
 
 type Source string
@@ -48,8 +50,17 @@ type SessionView struct {
 }
 
 type Snapshot struct {
-	Sessions  []SessionView
-	UpdatedAt time.Time
+	Sessions             []SessionView
+	UnreachableInstances []InstanceFailure
+	UpdatedAt            time.Time
+}
+
+type InstanceFailure struct {
+	InstanceID          string
+	Host                string
+	Port                int
+	ConsecutiveFailures int
+	LastError           time.Time
 }
 
 type sessionRow struct {
@@ -63,15 +74,17 @@ type sessionRow struct {
 }
 
 type instanceState struct {
-	id        string
-	name      string
-	client    *oc.Client
-	sessions  map[string]*sessionRow
-	perms     map[string]string
-	questions map[string]string
+	id                  string
+	name                string
+	host                string
+	port                int
+	client              *oc.Client
+	sessions            map[string]*sessionRow
+	perms               map[string]string
+	questions           map[string]string
+	lastError           time.Time
+	consecutiveFailures int
 }
-
-const messageActivityDebounce = 250 * time.Millisecond
 
 type Store struct {
 	mu        sync.Mutex
@@ -79,13 +92,23 @@ type Store struct {
 	listeners []chan Snapshot
 	now       func() time.Time
 	lookupCtx context.Context
+	cfg       *config.Config
+	logger    *slog.Logger
 }
 
-func New(ctx context.Context) *Store {
+func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) *Store {
+	if cfg == nil {
+		cfg = config.Default()
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Store{
 		instances: map[string]*instanceState{},
 		now:       time.Now,
 		lookupCtx: ctx,
+		cfg:       cfg,
+		logger:    logger,
 	}
 }
 
@@ -104,7 +127,9 @@ func (s *Store) AddInstance(inst discovery.Instance) {
 		s.instances[inst.ID] = &instanceState{
 			id:        inst.ID,
 			name:      inst.ID,
-			client:    oc.NewClient(inst.BaseURL()),
+			host:      inst.Host,
+			port:      inst.Port,
+			client:    oc.NewClient(inst.BaseURL(), s.cfg),
 			sessions:  map[string]*sessionRow{},
 			perms:     map[string]string{},
 			questions: map[string]string{},
@@ -119,6 +144,43 @@ func (s *Store) RemoveInstance(id string) {
 	delete(s.instances, id)
 	s.mu.Unlock()
 	s.publish()
+}
+
+func (s *Store) RecordInstanceError(id string, err error) {
+	if err == nil {
+		return
+	}
+	now := s.now()
+	changed := false
+	s.mu.Lock()
+	if inst := s.instances[id]; inst != nil {
+		inst.consecutiveFailures++
+		inst.lastError = now
+		changed = true
+	}
+	s.mu.Unlock()
+	if changed {
+		s.publish()
+	}
+}
+
+func (s *Store) RecordInstanceSuccess(id string) {
+	changed := false
+	s.mu.Lock()
+	if inst := s.instances[id]; inst != nil {
+		if inst.consecutiveFailures != 0 {
+			inst.consecutiveFailures = 0
+			changed = true
+		}
+		if !inst.lastError.IsZero() {
+			inst.lastError = time.Time{}
+			changed = true
+		}
+	}
+	s.mu.Unlock()
+	if changed {
+		s.publish()
+	}
 }
 
 // SyncRecent imports sessions from a recency-window /session
@@ -242,7 +304,7 @@ func (s *Store) ApplyEvent(instanceID string, evt oc.Event) {
 	switch evt.Type {
 	case "session.created", "session.updated":
 		var p oc.SessionInfoEvt
-		if json.Unmarshal(evt.Properties, &p) == nil {
+		if err := json.Unmarshal(evt.Properties, &p); err == nil {
 			row := promote(p.SessionID)
 			if row != nil {
 				if mergeSessionInfo(&row.info, p.Info) {
@@ -251,18 +313,22 @@ func (s *Store) ApplyEvent(instanceID string, evt oc.Event) {
 				row.lastActivity = now
 				changed = true
 			}
+		} else {
+			s.logger.Debug("dropping event with unknown payload", "type", evt.Type, "err", err)
 		}
 	case "session.deleted":
 		var p oc.SessionInfoEvt
-		if json.Unmarshal(evt.Properties, &p) == nil {
+		if err := json.Unmarshal(evt.Properties, &p); err == nil {
 			if _, ok := inst.sessions[p.SessionID]; ok {
 				delete(inst.sessions, p.SessionID)
 				changed = true
 			}
+		} else {
+			s.logger.Debug("dropping event with unknown payload", "type", evt.Type, "err", err)
 		}
 	case "session.status":
 		var p oc.SessionStatusEvt
-		if json.Unmarshal(evt.Properties, &p) == nil {
+		if err := json.Unmarshal(evt.Properties, &p); err == nil {
 			row := promote(p.SessionID)
 			if row != nil {
 				if row.status != p.Status {
@@ -272,10 +338,12 @@ func (s *Store) ApplyEvent(instanceID string, evt oc.Event) {
 				row.lastActivity = now
 				changed = true
 			}
+		} else {
+			s.logger.Debug("dropping event with unknown payload", "type", evt.Type, "err", err)
 		}
 	case "session.idle":
 		var p oc.SessionIDEvt
-		if json.Unmarshal(evt.Properties, &p) == nil {
+		if err := json.Unmarshal(evt.Properties, &p); err == nil {
 			row := promote(p.SessionID)
 			if row != nil {
 				if row.status.Type == "" {
@@ -285,19 +353,23 @@ func (s *Store) ApplyEvent(instanceID string, evt oc.Event) {
 				row.lastActivity = now
 				changed = true
 			}
+		} else {
+			s.logger.Debug("dropping event with unknown payload", "type", evt.Type, "err", err)
 		}
 	case "session.error":
 		var p oc.SessionErrorEvt
-		if json.Unmarshal(evt.Properties, &p) == nil {
+		if err := json.Unmarshal(evt.Properties, &p); err == nil {
 			row := promote(p.SessionID)
 			if row != nil {
 				row.lastError = now
 				changed = true
 			}
+		} else {
+			s.logger.Debug("dropping event with unknown payload", "type", evt.Type, "err", err)
 		}
 	case "permission.asked":
 		var p oc.PermissionRequest
-		if json.Unmarshal(evt.Properties, &p) == nil {
+		if err := json.Unmarshal(evt.Properties, &p); err == nil {
 			if existing, ok := inst.perms[p.ID]; !ok || existing != p.SessionID {
 				inst.perms[p.ID] = p.SessionID
 				changed = true
@@ -307,10 +379,12 @@ func (s *Store) ApplyEvent(instanceID string, evt oc.Event) {
 				row.hasPerm = true
 				changed = true
 			}
+		} else {
+			s.logger.Debug("dropping event with unknown payload", "type", evt.Type, "err", err)
 		}
 	case "permission.replied":
 		var p oc.PermissionRepliedEvt
-		if json.Unmarshal(evt.Properties, &p) == nil {
+		if err := json.Unmarshal(evt.Properties, &p); err == nil {
 			if _, ok := inst.perms[p.RequestID]; ok {
 				delete(inst.perms, p.RequestID)
 				changed = true
@@ -322,6 +396,8 @@ func (s *Store) ApplyEvent(instanceID string, evt oc.Event) {
 					changed = true
 				}
 			}
+		} else {
+			s.logger.Debug("dropping event with unknown payload", "type", evt.Type, "err", err)
 		}
 	case "message.updated", "message.part.updated", "message.part.delta":
 		var p struct {
@@ -339,7 +415,7 @@ func (s *Store) ApplyEvent(instanceID string, evt oc.Event) {
 				} `json:"state"`
 			} `json:"part"`
 		}
-		if json.Unmarshal(evt.Properties, &p) == nil {
+		if err := json.Unmarshal(evt.Properties, &p); err == nil {
 			sid := p.SessionID
 			if sid == "" && p.Info != nil {
 				sid = p.Info.SessionID
@@ -350,7 +426,7 @@ func (s *Store) ApplyEvent(instanceID string, evt oc.Event) {
 			if sid != "" {
 				row := promote(sid)
 				if row != nil {
-					if row.lastActivity.IsZero() || now.Sub(row.lastActivity) >= messageActivityDebounce {
+					if row.lastActivity.IsZero() || now.Sub(row.lastActivity) >= s.cfg.MessageActivityDebounce {
 						row.lastActivity = now
 						changed = true
 					}
@@ -384,6 +460,8 @@ func (s *Store) ApplyEvent(instanceID string, evt oc.Event) {
 					}
 				}
 			}
+		} else {
+			s.logger.Debug("dropping event with unknown payload", "type", evt.Type, "err", err)
 		}
 	}
 	s.mu.Unlock()
@@ -471,10 +549,11 @@ func (s *Store) fetchSessionInfo(instanceID, sid string) {
 	if client == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(s.lookupCtx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(s.lookupCtx, s.cfg.SessionLookupTimeout)
 	defer cancel()
 	info, err := client.GetSession(ctx, sid)
 	if err != nil {
+		s.logger.Warn("session lookup failed", "instance", instanceID, "session", sid, "err", err)
 		return
 	}
 	changed := false
@@ -540,6 +619,33 @@ func (s *Store) snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
+	threshold := s.cfg.UnreachableThreshold
+	if threshold < 1 {
+		threshold = 1
+	}
+
+	unreachable := make([]InstanceFailure, 0)
+	for _, inst := range s.instances {
+		if inst.consecutiveFailures >= threshold {
+			unreachable = append(unreachable, InstanceFailure{
+				InstanceID:          inst.id,
+				Host:                inst.host,
+				Port:                inst.port,
+				ConsecutiveFailures: inst.consecutiveFailures,
+				LastError:           inst.lastError,
+			})
+		}
+	}
+	sort.Slice(unreachable, func(i, j int) bool {
+		if unreachable[i].Host != unreachable[j].Host {
+			return unreachable[i].Host < unreachable[j].Host
+		}
+		if unreachable[i].Port != unreachable[j].Port {
+			return unreachable[i].Port < unreachable[j].Port
+		}
+		return unreachable[i].InstanceID < unreachable[j].InstanceID
+	})
+
 	// Multiple opencode processes started in the same project directory
 	// expose the same project-scoped session list, so the same SessionID
 	// can appear under several InstanceStates. Dedupe to one row per
@@ -547,11 +653,13 @@ func (s *Store) snapshot() Snapshot {
 	// status/activity the recent-only row lacks). Within the same source,
 	// pick the row with the most recent activity.
 	type candidate struct {
-		view SessionView
-		live bool
+		view    SessionView
+		live    bool
+		healthy bool
 	}
 	best := map[string]candidate{}
 	for _, inst := range s.instances {
+		healthy := inst.consecutiveFailures < threshold
 		for _, row := range inst.sessions {
 			var created time.Time
 			if row.info.Time.Created > 0 {
@@ -572,10 +680,16 @@ func (s *Store) snapshot() Snapshot {
 				LastActivity: row.lastActivity,
 				Created:      created,
 			}
-			cand := candidate{view: sv, live: row.source == SourceLive}
+			cand := candidate{view: sv, live: row.source == SourceLive, healthy: healthy}
 			cur, ok := best[sv.SessionID]
 			if !ok {
 				best[sv.SessionID] = cand
+				continue
+			}
+			if cand.healthy != cur.healthy {
+				if cand.healthy {
+					best[sv.SessionID] = cand
+				}
 				continue
 			}
 			if cand.live && !cur.live {
@@ -587,6 +701,7 @@ func (s *Store) snapshot() Snapshot {
 			}
 		}
 	}
+
 	rows := make([]SessionView, 0, len(best))
 	for _, c := range best {
 		rows = append(rows, c.view)
@@ -600,5 +715,5 @@ func (s *Store) snapshot() Snapshot {
 		}
 		return rows[i].LastActivity.After(rows[j].LastActivity)
 	})
-	return Snapshot{Sessions: rows, UpdatedAt: now}
+	return Snapshot{Sessions: rows, UnreachableInstances: unreachable, UpdatedAt: now}
 }

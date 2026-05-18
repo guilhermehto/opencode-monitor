@@ -3,12 +3,18 @@ package state
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"testing"
 	"time"
 
-	"github.com/goliveira/cogitator/internal/discovery"
-	"github.com/goliveira/cogitator/internal/oc"
+	"github.com/guilhermehto/cogitator/internal/config"
+	"github.com/guilhermehto/cogitator/internal/discovery"
+	"github.com/guilhermehto/cogitator/internal/oc"
 )
+
+func newTestStore(ctx context.Context) *Store {
+	return New(ctx, config.Default(), slog.Default())
+}
 
 func makeSession(id string, updatedMs int64) oc.Session {
 	var s oc.Session
@@ -29,7 +35,7 @@ func mustJSON(t *testing.T, v any) []byte {
 
 func TestSyncRecentPrunesOnlyRecentRows(t *testing.T) {
 	ctx := context.Background()
-	s := New(ctx)
+	s := newTestStore(ctx)
 	inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 1}
 	s.AddInstance(inst)
 
@@ -56,7 +62,7 @@ func TestSyncRecentPrunesOnlyRecentRows(t *testing.T) {
 
 func TestApplyEventUnknownTypeDoesNotPublish(t *testing.T) {
 	ctx := context.Background()
-	s := New(ctx)
+	s := newTestStore(ctx)
 	inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 1}
 	s.AddInstance(inst)
 
@@ -78,7 +84,7 @@ func TestApplyEventUnknownTypeDoesNotPublish(t *testing.T) {
 
 func TestSnapshotCarriesCreated(t *testing.T) {
 	ctx := context.Background()
-	s := New(ctx)
+	s := newTestStore(ctx)
 	inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 1}
 	s.AddInstance(inst)
 
@@ -98,7 +104,7 @@ func TestSnapshotCarriesCreated(t *testing.T) {
 
 func TestSnapshotCreatedZeroWhenAbsent(t *testing.T) {
 	ctx := context.Background()
-	s := New(ctx)
+	s := newTestStore(ctx)
 	inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 1}
 	s.AddInstance(inst)
 
@@ -119,7 +125,7 @@ func TestSnapshotCreatedZeroWhenAbsent(t *testing.T) {
 
 func TestSnapshotSortBreaksLastActivityTiesBySessionID(t *testing.T) {
 	ctx := context.Background()
-	s := New(ctx)
+	s := newTestStore(ctx)
 	inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 1}
 	s.AddInstance(inst)
 
@@ -136,7 +142,7 @@ func TestSnapshotSortBreaksLastActivityTiesBySessionID(t *testing.T) {
 
 func TestApplyEventQuestionPendingLifecycle(t *testing.T) {
 	ctx := context.Background()
-	s := New(ctx)
+	s := newTestStore(ctx)
 	inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 1}
 	s.AddInstance(inst)
 	s.SyncRecent(inst.ID, []oc.Session{makeSession("S1", 1_000)})
@@ -189,7 +195,7 @@ func TestApplyEventQuestionPendingLifecycle(t *testing.T) {
 }
 func TestSnapshotDedupesSessionAcrossInstances(t *testing.T) {
 	ctx := context.Background()
-	s := New(ctx)
+	s := newTestStore(ctx)
 	instA := discovery.Instance{ID: "127.0.0.1:1111", Host: "127.0.0.1", Port: 1111}
 	instB := discovery.Instance{ID: "127.0.0.1:2222", Host: "127.0.0.1", Port: 2222}
 	s.AddInstance(instA)
@@ -230,7 +236,7 @@ func TestSnapshotDedupesSessionAcrossInstances(t *testing.T) {
 
 func TestSnapshotDedupePicksMostRecentWhenSameSource(t *testing.T) {
 	ctx := context.Background()
-	s := New(ctx)
+	s := newTestStore(ctx)
 	instA := discovery.Instance{ID: "127.0.0.1:1111", Host: "127.0.0.1", Port: 1111}
 	instB := discovery.Instance{ID: "127.0.0.1:2222", Host: "127.0.0.1", Port: 2222}
 	s.AddInstance(instA)
@@ -260,5 +266,84 @@ func TestSnapshotDedupePicksMostRecentWhenSameSource(t *testing.T) {
 	wantActivity := time.UnixMilli(5_000)
 	if !winner.LastActivity.Equal(wantActivity) {
 		t.Fatalf("expected LastActivity %v, got %v", wantActivity, winner.LastActivity)
+	}
+}
+
+func TestRecordInstanceErrorAndSuccessLifecycle(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Default()
+	cfg.UnreachableThreshold = 2
+	s := New(ctx, cfg, slog.Default())
+	inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 7777}
+	s.AddInstance(inst)
+
+	now := time.Unix(1_700_000, 0)
+	s.now = func() time.Time { return now }
+	s.RecordInstanceError(inst.ID, context.DeadlineExceeded)
+
+	snap := s.snapshot()
+	if len(snap.UnreachableInstances) != 0 {
+		t.Fatalf("unexpected unreachable instances after first error: %+v", snap.UnreachableInstances)
+	}
+
+	now = now.Add(time.Second)
+	s.RecordInstanceError(inst.ID, context.DeadlineExceeded)
+	snap = s.snapshot()
+	if len(snap.UnreachableInstances) != 1 {
+		t.Fatalf("expected one unreachable instance at threshold, got %+v", snap.UnreachableInstances)
+	}
+	f := snap.UnreachableInstances[0]
+	if f.InstanceID != inst.ID || f.ConsecutiveFailures != 2 || f.Host != "127.0.0.1" || f.Port != 7777 {
+		t.Fatalf("unexpected failure entry: %+v", f)
+	}
+
+	s.RecordInstanceSuccess(inst.ID)
+	snap = s.snapshot()
+	if len(snap.UnreachableInstances) != 0 {
+		t.Fatalf("expected unreachable list to clear after success, got %+v", snap.UnreachableInstances)
+	}
+}
+
+func TestSnapshotDedupePrefersHealthyInstance(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Default()
+	cfg.UnreachableThreshold = 2
+	s := New(ctx, cfg, slog.Default())
+	instA := discovery.Instance{ID: "127.0.0.1:1111", Host: "127.0.0.1", Port: 1111}
+	instB := discovery.Instance{ID: "127.0.0.1:2222", Host: "127.0.0.1", Port: 2222}
+	s.AddInstance(instA)
+	s.AddInstance(instB)
+
+	shared := []oc.Session{makeSession("ses_dup", 1_000)}
+	s.SyncRecent(instA.ID, shared)
+	s.SyncRecent(instB.ID, shared)
+
+	// instA wins by source (live) before reachability is considered.
+	s.ApplyEvent(instA.ID, oc.Event{
+		Type:       "session.status",
+		Properties: mustJSON(t, oc.SessionStatusEvt{SessionID: "ses_dup", Status: oc.Status{Type: "busy"}}),
+	})
+
+	// Once instA crosses the unreachable threshold, dedupe should pick instB.
+	s.RecordInstanceError(instA.ID, context.DeadlineExceeded)
+	s.RecordInstanceError(instA.ID, context.DeadlineExceeded)
+
+	snap := s.snapshot()
+	count := 0
+	var winner SessionView
+	for _, sv := range snap.Sessions {
+		if sv.SessionID == "ses_dup" {
+			count++
+			winner = sv
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected one deduped row, got %d", count)
+	}
+	if winner.InstanceID != instB.ID {
+		t.Fatalf("expected healthy instance %q to win dedupe, got %q", instB.ID, winner.InstanceID)
+	}
+	if len(snap.UnreachableInstances) != 1 || snap.UnreachableInstances[0].InstanceID != instA.ID {
+		t.Fatalf("expected only instA in unreachable list, got %+v", snap.UnreachableInstances)
 	}
 }

@@ -1,0 +1,80 @@
+package ui
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/guilhermehto/cogitator/internal/config"
+	"github.com/guilhermehto/cogitator/internal/state"
+)
+
+// RunStatus is the one-shot path used by status bars and shell prompts.
+func RunStatus(cfg *config.Config, logger *slog.Logger) error {
+	if cfg == nil {
+		cfg = config.Default()
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := state.New(ctx, cfg, logger)
+	if err := bootDiscovery(ctx, store, cfg, logger); err != nil {
+		return err
+	}
+
+	snaps := store.Subscribe()
+	deadline := time.NewTimer(cfg.StatusDeadline)
+	defer deadline.Stop()
+
+	for {
+		select {
+		case snap, ok := <-snaps:
+			if !ok {
+				fmt.Println("")
+				return nil
+			}
+			if len(snap.Sessions) == 0 {
+				continue
+			}
+			fmt.Println(formatStatusLine(snap.Sessions))
+			return nil
+		case <-deadline.C:
+			fmt.Println("")
+			return nil
+		}
+	}
+}
+
+// formatStatusLine counts attention-bearing rows and renders a compact
+// `<glyph> <count>` summary. Empty string means no session needs eyes.
+func formatStatusLine(rows []state.SessionView) string {
+	perm, question, errored := 0, 0, 0
+	for _, sv := range rows {
+		switch sv.Attention {
+		case state.AttnPermissionPending:
+			perm++
+		case state.AttnQuestionPending:
+			question++
+		case state.AttnErrored:
+			errored++
+		}
+	}
+
+	var parts []string
+	if question > 0 {
+		parts = append(parts, fmt.Sprintf("%s %d", glyphQuestion, question))
+	}
+	if perm > 0 {
+		parts = append(parts, fmt.Sprintf("%s %d", glyphPermission, perm))
+	}
+	if errored > 0 {
+		parts = append(parts, fmt.Sprintf("%s %d", glyphError, errored))
+	}
+	return strings.Join(parts, " ")
+}

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/guilhermehto/cogitator/internal/config"
 )
 
 type Client struct {
@@ -13,10 +15,13 @@ type Client struct {
 	HTTP    *http.Client
 }
 
-func NewClient(baseURL string) *Client {
+func NewClient(baseURL string, cfg *config.Config) *Client {
+	if cfg == nil {
+		cfg = config.Default()
+	}
 	return &Client{
 		BaseURL: baseURL,
-		HTTP:    &http.Client{Timeout: 10 * time.Second},
+		HTTP:    &http.Client{Timeout: cfg.HTTPTimeout},
 	}
 }
 

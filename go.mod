@@ -1,4 +1,4 @@
-module github.com/goliveira/cogitator
+module github.com/guilhermehto/cogitator
 
 go 1.25.6
 
